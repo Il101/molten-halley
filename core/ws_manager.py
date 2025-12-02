@@ -294,12 +294,14 @@ class WebSocketManager:
                         self.logger.info(f"BingX ticker keys: {list(data.keys())}")
                         self._bingx_keys_logged = True
                     
-                    # Try to get bid/ask, fallback to last price if not available
-                    bid = float(data.get('b', 0)) or float(data.get('bid1', 0)) or float(data.get('c', 0))
-                    ask = float(data.get('a', 0)) or float(data.get('ask1', 0)) or float(data.get('c', 0))
+                    # BingX uses uppercase keys:
+                    # A = Ask price, B = Bid price, c = Close/last price
+                    # a = ask size, b = bid size (lowercase are sizes, not prices!)
+                    bid = float(data.get('B', 0))  # Uppercase B for bid price
+                    ask = float(data.get('A', 0))  # Uppercase A for ask price
                     last = float(data.get('c', 0))  # Close/last price
                     
-                    # If still no bid/ask, use last price as fallback
+                    # Fallback to last price if bid/ask not available
                     if bid == 0:
                         bid = last
                     if ask == 0:
