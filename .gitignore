@@ -1,9 +1,68 @@
+# Python
 __pycache__/
-*.pyc
-.DS_Store
-.env
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+PIPFILE.lock
+
+# Virtual environments
 venv/
-.idea/
+ENV/
+env/
+.venv/
+
+# IDE
 .vscode/
-arbitrage_candidates.csv
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Configuration (sensitive data)
+config/exchanges.yaml
+*.env
+.env.local
+
+# Data files
+*.csv
+*.json.bak
 arbitrage_analysis_plot.png
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ArbiBot specific
+config/whitelist.json.bak
+backup/
