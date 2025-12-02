@@ -79,21 +79,43 @@ def main():
 
 def run_gui(args):
     """
-    Launch PyQt6 GUI application
+    Launch PyQt6 GUI application with qasync integration.
+    
+    Uses qasync to run asyncio and Qt event loops together,
+    allowing WebSocket connections to work alongside the GUI.
     """
     logger.info("Launching GUI...")
     try:
+        import asyncio
         from PyQt6.QtWidgets import QApplication
-        from gui.main_window import ArbiGUI
+        import qasync
+        from gui.main_window import MainWindow
         
+        # Create Qt application
         app = QApplication(sys.argv)
-        window = ArbiGUI(config_path=args.config)
+        app.setApplicationName("ArbiBot")
+        app.setOrganizationName("ArbiBot")
+        
+        # Setup qasync event loop
+        loop = qasync.QEventLoop(app)
+        asyncio.set_event_loop(loop)
+        
+        # Create main window
+        window = MainWindow()
         window.show()
-        sys.exit(app.exec())
+        
+        # Run event loop
+        with loop:
+            loop.run_forever()
+            
     except ImportError as e:
         logger.error(f"GUI dependencies not installed: {e}")
-        logger.error("Install with: pip install PyQt6 pyqtgraph")
+        logger.error("Install with: pip install PyQt6 pyqtgraph qasync")
         sys.exit(1)
+    except Exception as e:
+        logger.error(f"GUI error: {e}", exc_info=True)
+        sys.exit(1)
+
 
 
 def run_scanner(args):

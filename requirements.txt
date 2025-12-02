@@ -16,6 +16,14 @@ aiohttp>=3.9.0
 
 # GUI support
 PyQt6>=6.6.0
+pyqtgraph>=0.13.0
+qasync>=0.27.0
+
+# Logging
+colorlog>=6.7.0
+
+# Testing
+pytest>=7.4.0
 
 # Async and WebSockets
 aiohttp>=3.9.0

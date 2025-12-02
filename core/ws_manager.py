@@ -160,9 +160,9 @@ class WebSocketManager:
                         async for msg in ws:
                             # Handle TEXT messages (Bybit JSON, BingX Pong)
                             if msg.type == WSMsgType.TEXT:
-                                # Check if it's a raw "Pong" from BingX
-                                if msg.data == "Pong":
-                                    self.logger.debug(f"Received Pong from {exchange_name}")
+                                # Check if it's a raw "Pong" or "Ping" echo from BingX
+                                if msg.data.strip().lower() in ["pong", "ping"]:
+                                    self.logger.debug(f"Received heartbeat from {exchange_name}: {msg.data}")
                                     continue
                                 
                                 # Otherwise parse as JSON
@@ -180,9 +180,9 @@ class WebSocketManager:
                                     # Decompress GZIP data
                                     decompressed = gzip.decompress(msg.data).decode('utf-8').strip()
                                     
-                                    # Check if it's a raw "Pong" or empty
-                                    if not decompressed or decompressed.lower() == "pong":
-                                        self.logger.debug(f"Received Pong from {exchange_name}")
+                                    # Check if it's a raw "Pong" or "Ping" echo or empty
+                                    if not decompressed or decompressed.lower() in ["pong", "ping"]:
+                                        self.logger.debug(f"Received heartbeat from {exchange_name}: {decompressed}")
                                         continue
                                     
                                     # Try to parse as JSON
@@ -206,7 +206,6 @@ class WebSocketManager:
                             elif msg.type == WSMsgType.CLOSED:
                                 self.logger.warning(f"WebSocket closed by {exchange_name}")
                                 break
-
                         
                         # Connection closed
                         heartbeat_task.cancel()
