@@ -178,20 +178,24 @@ class WebSocketManager:
                             elif msg.type == WSMsgType.BINARY:
                                 try:
                                     # Decompress GZIP data
-                                    decompressed = gzip.decompress(msg.data).decode('utf-8')
+                                    decompressed = gzip.decompress(msg.data).decode('utf-8').strip()
                                     
-                                    # Check if it's a raw "Pong"
-                                    if decompressed == "Pong":
+                                    # Check if it's a raw "Pong" or empty
+                                    if not decompressed or decompressed.lower() == "pong":
                                         self.logger.debug(f"Received Pong from {exchange_name}")
                                         continue
                                     
-                                    # Parse as JSON
-                                    data = json.loads(decompressed)
-                                    await self._handle_message(exchange_name, data)
+                                    # Try to parse as JSON
+                                    try:
+                                        data = json.loads(decompressed)
+                                        await self._handle_message(exchange_name, data)
+                                    except json.JSONDecodeError:
+                                        # Not JSON, might be another heartbeat format
+                                        self.logger.debug(f"Non-JSON message from {exchange_name}: {decompressed[:50]}")
+                                        continue
+                                        
                                 except gzip.BadGzipFile as e:
                                     self.logger.error(f"GZIP decompression error from {exchange_name}: {e}")
-                                except json.JSONDecodeError as e:
-                                    self.logger.error(f"JSON decode error from {exchange_name} (after GZIP): {e}")
                                 except Exception as e:
                                     self.logger.error(f"Error handling binary message from {exchange_name}: {e}")
                             
