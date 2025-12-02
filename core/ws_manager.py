@@ -7,6 +7,7 @@ Handles connection lifecycle, message normalization, and auto-reconnection.
 
 import asyncio
 import json
+import gzip
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -14,6 +15,7 @@ from collections import defaultdict
 import sys
 
 import aiohttp
+from aiohttp import WSMsgType
 import yaml
 
 # Add parent directory to path for imports
@@ -156,7 +158,14 @@ class WebSocketManager:
                         
                         # Message processing loop
                         async for msg in ws:
-                            if msg.type == aiohttp.WSMsgType.TEXT:
+                            # Handle TEXT messages (Bybit JSON, BingX Pong)
+                            if msg.type == WSMsgType.TEXT:
+                                # Check if it's a raw "Pong" from BingX
+                                if msg.data == "Pong":
+                                    self.logger.debug(f"Received Pong from {exchange_name}")
+                                    continue
+                                
+                                # Otherwise parse as JSON
                                 try:
                                     data = json.loads(msg.data)
                                     await self._handle_message(exchange_name, data)
@@ -165,13 +174,35 @@ class WebSocketManager:
                                 except Exception as e:
                                     self.logger.error(f"Error handling message from {exchange_name}: {e}")
                             
-                            elif msg.type == aiohttp.WSMsgType.ERROR:
+                            # Handle BINARY messages (BingX GZIP compressed)
+                            elif msg.type == WSMsgType.BINARY:
+                                try:
+                                    # Decompress GZIP data
+                                    decompressed = gzip.decompress(msg.data).decode('utf-8')
+                                    
+                                    # Check if it's a raw "Pong"
+                                    if decompressed == "Pong":
+                                        self.logger.debug(f"Received Pong from {exchange_name}")
+                                        continue
+                                    
+                                    # Parse as JSON
+                                    data = json.loads(decompressed)
+                                    await self._handle_message(exchange_name, data)
+                                except gzip.BadGzipFile as e:
+                                    self.logger.error(f"GZIP decompression error from {exchange_name}: {e}")
+                                except json.JSONDecodeError as e:
+                                    self.logger.error(f"JSON decode error from {exchange_name} (after GZIP): {e}")
+                                except Exception as e:
+                                    self.logger.error(f"Error handling binary message from {exchange_name}: {e}")
+                            
+                            elif msg.type == WSMsgType.ERROR:
                                 self.logger.error(f"WebSocket error from {exchange_name}: {ws.exception()}")
                                 break
                             
-                            elif msg.type == aiohttp.WSMsgType.CLOSED:
+                            elif msg.type == WSMsgType.CLOSED:
                                 self.logger.warning(f"WebSocket closed by {exchange_name}")
                                 break
+
                         
                         # Connection closed
                         heartbeat_task.cancel()
@@ -249,18 +280,37 @@ class WebSocketManager:
             normalized_data = None
             
             if exchange_name == 'bingx':
+                # Debug: Log raw BingX payload
+                self.logger.debug(f"Raw BingX payload: {message}")
+                
                 # BingX message format
                 if 'dataType' in message and '@ticker' in message.get('dataType', ''):
                     data = message.get('data', {})
                     symbol_raw = message['dataType'].split('@')[0]
                     symbol = symbol_raw.replace('-', '/')  # Convert back to BTC/USDT
                     
+                    # Log available keys in first message
+                    if not hasattr(self, '_bingx_keys_logged'):
+                        self.logger.info(f"BingX ticker keys: {list(data.keys())}")
+                        self._bingx_keys_logged = True
+                    
+                    # Try to get bid/ask, fallback to last price if not available
+                    bid = float(data.get('b', 0)) or float(data.get('bid1', 0)) or float(data.get('c', 0))
+                    ask = float(data.get('a', 0)) or float(data.get('ask1', 0)) or float(data.get('c', 0))
+                    last = float(data.get('c', 0))  # Close/last price
+                    
+                    # If still no bid/ask, use last price as fallback
+                    if bid == 0:
+                        bid = last
+                    if ask == 0:
+                        ask = last
+                    
                     normalized_data = {
                         'exchange': 'bingx',
                         'symbol': symbol,
-                        'bid': float(data.get('b', 0)),  # Best bid price
-                        'ask': float(data.get('a', 0)),  # Best ask price
-                        'last': float(data.get('c', 0)),  # Last price
+                        'bid': bid,
+                        'ask': ask,
+                        'last': last,
                         'timestamp': int(data.get('E', 0)),  # Event time
                         'local_timestamp': time.time()
                     }
@@ -326,14 +376,14 @@ class WebSocketManager:
                 await asyncio.sleep(ping_interval)
                 
                 if exchange_name == 'bingx':
-                    # BingX ping format
-                    await ws.send_json({"ping": int(time.time() * 1000)})
+                    # BingX ping format: raw string "Ping"
+                    await ws.send_str("Ping")
+                    self.logger.debug(f"Sent Ping (raw string) to {exchange_name}")
                 
                 elif exchange_name == 'bybit':
-                    # Bybit ping format
+                    # Bybit ping format: JSON
                     await ws.send_json({"op": "ping"})
-                
-                self.logger.debug(f"Sent ping to {exchange_name}")
+                    self.logger.debug(f"Sent ping (JSON) to {exchange_name}")
         
         except asyncio.CancelledError:
             self.logger.debug(f"Heartbeat cancelled for {exchange_name}")
