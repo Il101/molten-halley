@@ -66,3 +66,19 @@ scanner:
   exclude_patterns:
     - '1000*'                   # Exclude 1000PEPE, 1000SHIB, etc.
   auto_update_whitelist: true
+
+# WebSocket configuration
+websocket:
+  bingx:
+    url: 'wss://open-api-swap.bingx.com/swap-market'
+    enabled: true
+  
+  bybit:
+    url: 'wss://stream.bybit.com/v5/public/linear'
+    enabled: true
+  
+  reconnect_delay: 5            # Seconds
+  max_reconnect_attempts: 10
+  ping_interval: 30             # Seconds
+  pong_timeout: 60              # Seconds
+  message_queue_size: 1000      # Max messages in queue
