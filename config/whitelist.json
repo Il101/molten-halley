@@ -1,0 +1,17 @@
+{
+  "last_updated": "2025-12-02T21:00:00Z",
+  "pairs": [
+    {
+      "symbol": "BTC/USDT",
+      "adf_pvalue": 0.001,
+      "max_spread_pct": 0.05,
+      "is_stationary": true,
+      "enabled": true
+    }
+  ],
+  "metadata": {
+    "total_scanned": 0,
+    "passed_validation": 0,
+    "scan_duration_seconds": 0
+  }
+}

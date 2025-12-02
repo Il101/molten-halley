@@ -1,0 +1,18 @@
+# Exchange API Keys Configuration
+# Copy this file to exchanges.yaml and fill in your API keys
+# IMPORTANT: Add exchanges.yaml to .gitignore!
+
+bingx:
+  api_key: 'YOUR_BINGX_API_KEY'
+  secret: 'YOUR_BINGX_SECRET'
+  testnet: false
+  
+bybit:
+  api_key: 'YOUR_BYBIT_API_KEY'
+  secret: 'YOUR_BYBIT_SECRET'
+  testnet: false
+
+# Notes:
+# - Keep this file SECRET
+# - Never commit exchanges.yaml to git
+# - Use testnet for development
