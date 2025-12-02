@@ -333,12 +333,25 @@ class WebSocketManager:
                     else:
                         symbol = symbol_raw
                     
+                    # Bybit sends two types of messages:
+                    # - "snapshot": Full data (first message)
+                    # - "delta": Partial updates (only changed fields)
+                    # We need to merge delta updates with cached data
+                    
+                    # Get cached data or create new entry
+                    cached = self.latest_prices.get(exchange_name, {}).get(symbol, {})
+                    
+                    # Extract values, use cached if not present in delta
+                    bid = float(data.get('bid1Price', 0)) or cached.get('bid', 0)
+                    ask = float(data.get('ask1Price', 0)) or cached.get('ask', 0)
+                    last = float(data.get('lastPrice', 0)) or cached.get('last', 0)
+                    
                     normalized_data = {
                         'exchange': 'bybit',
                         'symbol': symbol,
-                        'bid': float(data.get('bid1Price', 0)),
-                        'ask': float(data.get('ask1Price', 0)),
-                        'last': float(data.get('lastPrice', 0)),
+                        'bid': bid,
+                        'ask': ask,
+                        'last': last,
                         'timestamp': int(message.get('ts', 0)),
                         'local_timestamp': time.time()
                     }
