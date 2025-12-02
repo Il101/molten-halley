@@ -79,6 +79,6 @@ websocket:
   
   reconnect_delay: 5            # Seconds
   max_reconnect_attempts: 10
-  ping_interval: 30             # Seconds
+  ping_interval: 20  # Reduced from 30 to prevent BingX timeouts
   pong_timeout: 60              # Seconds
   message_queue_size: 1000      # Max messages in queue
