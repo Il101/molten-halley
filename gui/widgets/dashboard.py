@@ -158,55 +158,40 @@ class Dashboard(QWidget):
             price = data.get('last', 0)
             self.table_data_buffer[symbol]['bybit_price'] = price
     
-    @pyqtSlot(str, float, float)
-    def _on_spread_update(self, symbol: str, spread: float, z_score: float):
+    @pyqtSlot(dict)
+    def _on_spread_update(self, data: dict):
         """
         Handle spread/Z-Score update from EventBus.
         
         Args:
-            symbol: Trading pair symbol
-            spread: Current spread value
-            z_score: Current Z-Score
+            data: Dictionary with spread data including:
+                - symbol: Trading pair
+                - net_spread_pct: Net spread percentage
+                - z_score: Z-Score value
         """
+        # Extract data from dictionary
+        symbol = data.get('symbol', '')
+        z_score = data.get('z_score', 0.0)
+        net_spread_pct = data.get('net_spread_pct', 0.0)
+        
         # Ensure row exists
         if symbol not in self.rows:
             self._add_row(symbol)
         
         row = self.rows[symbol]
         
-        # Calculate spread percentage (approximate)
-        # Use cached BingX price as base
-        bingx_price = self.price_cache.get(symbol, 0)
-        if bingx_price > 0:
-            spread_pct = (abs(spread) / bingx_price) * 100
-        else:
-            spread_pct = 0
-        
-        # Update spread %
-        # OPTIMIZATION: Buffer for timer update
-        # spread_item = self._create_item(f"{spread_pct:.3f}%")
-        # self.table.setItem(row, 3, spread_item)
-        
-        # Update Z-Score with color coding
-        # ... (removed direct updates) ...
-        
         # Store Z-Score history
         if symbol not in self.z_score_history:
             self.z_score_history[symbol] = deque(maxlen=self.max_history_points)
         
         self.z_score_history[symbol].append((time.time(), z_score))
-        
-        # Update chart if this symbol is selected
-        # OPTIMIZATION: Don't update chart here, let the timer handle it
-        # if symbol == self.selected_symbol:
-        #     self._update_chart(symbol)
     
         # Store latest data for table update
         if symbol not in self.table_data_buffer:
             self.table_data_buffer[symbol] = {}
         
         self.table_data_buffer[symbol].update({
-            'spread_pct': spread_pct,
+            'spread_pct': net_spread_pct,  # Use net spread percentage
             'z_score': z_score
         })
 

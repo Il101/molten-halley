@@ -33,10 +33,11 @@ class MonitorTable(QWidget):
     COL_SYMBOL = 0
     COL_BINGX_PRICE = 1
     COL_BYBIT_PRICE = 2
-    COL_SPREAD_USD = 3
-    COL_SPREAD_PCT = 4
-    COL_ZSCORE = 5
-    COL_STATUS = 6
+    COL_GROSS_PCT = 3
+    COL_FEE_PCT = 4
+    COL_NET_PCT = 5
+    COL_ZSCORE = 6
+    COL_STATUS = 7
     
     def __init__(self):
         """Initialize monitor table."""
@@ -64,10 +65,10 @@ class MonitorTable(QWidget):
         
         # Table
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "Symbol", "BingX Price", "Bybit Price", 
-            "Spread $", "Spread %", "Z-Score", "Status"
+            "Gross %", "Fee %", "Net %", "Z-Score", "Status"
         ])
         
         # Table styling
@@ -81,10 +82,11 @@ class MonitorTable(QWidget):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)  # Symbol
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  # BingX
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Bybit
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Spread $
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # Spread %
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)  # Z-Score
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)  # Status
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Gross %
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # Fee %
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)  # Net %
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)  # Z-Score
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)  # Status
         
         layout.addWidget(self.table)
     
@@ -130,17 +132,30 @@ class MonitorTable(QWidget):
             self.logger.error(f"Error handling price update: {e}")
     
     
-    @pyqtSlot(str, float, float)
-    def _on_spread_updated(self, symbol: str, spread: float, zscore: float):
+    @pyqtSlot(dict)
+    def _on_spread_updated(self, data: dict):
         """
         Handle spread update from EventBus.
         
         Args:
-            symbol: Trading pair symbol
-            spread: Spread value in USD
-            zscore: Z-Score value
+            data: Dictionary with spread data including:
+                - symbol: Trading pair
+                - gross_spread_pct: Gross spread percentage
+                - fee_pct: Total fee percentage
+                - net_spread_pct: Net spread percentage (gross - fees)
+                - z_score: Z-Score value
         """
         try:
+            # Extract data from dictionary
+            symbol = data.get('symbol', '')
+            gross_spread_pct = data.get('gross_spread_pct', 0.0)
+            fee_pct = data.get('fee_pct', 0.0)
+            net_spread_pct = data.get('net_spread_pct', 0.0)
+            zscore = data.get('z_score', 0.0)
+            
+            if not symbol:
+                return
+            
             # Get or create row
             if symbol not in self.symbol_to_row:
                 row = self.table.rowCount()
@@ -156,23 +171,25 @@ class MonitorTable(QWidget):
             
             row = self.symbol_to_row[symbol]
             
-            # Calculate spread percentage using actual prices if available
-            bingx_price = self.latest_prices.get(symbol, {}).get('bingx', 0.0)
-            bybit_price = self.latest_prices.get(symbol, {}).get('bybit', 0.0)
+            # Update cells with new data structure
+            self._update_cell(row, self.COL_GROSS_PCT, f"{gross_spread_pct:.3f}%")
+            self._update_cell(row, self.COL_FEE_PCT, f"{fee_pct:.3f}%")
             
-            if bingx_price > 0 and bybit_price > 0:
-                mid_price = (bingx_price + bybit_price) / 2.0
-                spread_pct = (spread / mid_price) * 100.0
-            else:
-                # Fallback estimate
-                spread_pct = (spread / 50000.0) * 100.0
+            # Color-code net spread based on profitability
+            net_cell_text = f"{net_spread_pct:.3f}%"
+            self._update_cell(row, self.COL_NET_PCT, net_cell_text)
             
-            # Update cells
-            self._update_cell(row, self.COL_SPREAD_USD, f"${spread:,.2f}")
-            self._update_cell(row, self.COL_SPREAD_PCT, f"{spread_pct:.3f}%")
+            # Color the net spread cell based on value
+            net_item = self.table.item(row, self.COL_NET_PCT)
+            if net_item:
+                if net_spread_pct > 0:
+                    net_item.setForeground(QBrush(QColor(40, 167, 69)))  # Green for profit
+                elif net_spread_pct < 0:
+                    net_item.setForeground(QBrush(QColor(220, 53, 69)))  # Red for loss
+            
             self._update_cell(row, self.COL_ZSCORE, f"{zscore:.2f}")
             
-            # Determine status and color
+            # Determine status and color based on Z-Score
             status, bg_color = self._get_status_and_color(zscore)
             self._update_cell(row, self.COL_STATUS, status)
             
@@ -180,7 +197,7 @@ class MonitorTable(QWidget):
             self._set_row_background(row, bg_color)
             
         except Exception as e:
-            self.logger.error(f"Error updating table for {symbol}: {e}")
+            self.logger.error(f"Error updating table: {e}")
     
     def _update_cell(self, row: int, col: int, text: str):
         """

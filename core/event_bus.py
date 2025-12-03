@@ -22,7 +22,7 @@ class EventBus(QObject):
     
     # Signal definitions
     price_updated = pyqtSignal(dict)  # Emitted on each price update
-    spread_updated = pyqtSignal(str, float, float)  # (symbol, spread, z_score)
+    spread_updated = pyqtSignal(dict)  # Emitted with comprehensive spread data (gross, fee, net, z_score)
     signal_triggered = pyqtSignal(str, str, float)  # (symbol, 'ENTRY'|'EXIT', z_score)
     connection_status = pyqtSignal(str, bool)  # (exchange, connected)
     error_occurred = pyqtSignal(str, str)  # (component, error_message)
@@ -62,17 +62,6 @@ class EventBus(QObject):
             data: Normalized price data dictionary
         """
         self.price_updated.emit(data)
-    
-    def emit_spread_update(self, symbol: str, spread: float, z_score: float) -> None:
-        """
-        Emit a spread update event.
-        
-        Args:
-            symbol: Trading pair symbol
-            spread: Current spread value
-            z_score: Current Z-Score
-        """
-        self.spread_updated.emit(symbol, spread, z_score)
     
     def emit_signal_triggered(self, symbol: str, signal_type: str, z_score: float) -> None:
         """

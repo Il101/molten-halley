@@ -28,6 +28,40 @@ def calculate_spread(price_a: float, price_b: float, mode: str = 'absolute') -> 
     return spread
 
 
+def calculate_net_spread(gross_spread: float, price: float, taker_fee_a: float, taker_fee_b: float) -> tuple:
+    """
+    Calculate the net spread after deducting taker fees for a round trip.
+    
+    Net Spread = Gross Spread - Total Trading Fees
+    
+    Args:
+        gross_spread: Raw price difference between exchanges (absolute value)
+        price: Reference price for fee calculation (typically mid-price)
+        taker_fee_a: Taker fee rate for exchange A (e.g., 0.0005 for 0.05%)
+        taker_fee_b: Taker fee rate for exchange B (e.g., 0.00055 for 0.055%)
+    
+    Returns:
+        Tuple of (net_spread_val, net_spread_pct, fee_cost):
+            - net_spread_val: Net spread in absolute terms (USD)
+            - net_spread_pct: Net spread as percentage
+            - fee_cost: Total fee cost in absolute terms (USD)
+    """
+    if price <= 0:
+        return 0.0, 0.0, 0.0
+    
+    # Calculate total round-trip fee rate (buy on one exchange, sell on other)
+    total_fee_rate = taker_fee_a + taker_fee_b
+    
+    # Calculate fee cost in absolute terms
+    fee_cost = price * total_fee_rate
+    
+    # Calculate net spread
+    net_spread_val = gross_spread - fee_cost
+    net_spread_pct = (net_spread_val / price) * 100 if price > 0 else 0.0
+    
+    return net_spread_val, net_spread_pct, fee_cost
+
+
 def calculate_z_score(data: pd.Series, window: int = 20) -> pd.Series:
     """
     Calculate rolling Z-Score for time series data.
@@ -127,30 +161,55 @@ def adf_test(series: pd.Series, significance_level: float = 0.05) -> Tuple[bool,
         return False, 1.0, {'error': str(e)}
 
 
-def calculate_spread_stats(spread_series: pd.Series) -> dict:
+def calculate_spread_stats(spread_series: pd.Series, price: Optional[float] = None, 
+                          taker_fee_a: Optional[float] = None, 
+                          taker_fee_b: Optional[float] = None) -> dict:
     """
     Calculate comprehensive statistics for a spread series.
     
     Args:
         spread_series: Pandas Series with spread values
+        price: Optional reference price for net spread calculation
+        taker_fee_a: Optional taker fee rate for exchange A
+        taker_fee_b: Optional taker fee rate for exchange B
     
     Returns:
-        Dict with statistics
+        Dict with statistics (includes net spread stats if fees provided)
     """
     clean_data = spread_series.dropna()
     
     if len(clean_data) == 0:
         return {'error': 'No data available'}
     
-    return {
-        'mean': clean_data.mean(),
-        'std': clean_data.std(),
-        'min': clean_data.min(),
-        'max': clean_data.max(),
-        'current': clean_data.iloc[-1] if len(clean_data) > 0 else None,
-        'median': clean_data.median(),
+    stats = {
+        'gross_mean': clean_data.mean(),
+        'gross_std': clean_data.std(),
+        'gross_min': clean_data.min(),
+        'gross_max': clean_data.max(),
+        'gross_current': clean_data.iloc[-1] if len(clean_data) > 0 else None,
+        'gross_median': clean_data.median(),
         'count': len(clean_data)
     }
+    
+    # Calculate net spread statistics if fees are provided
+    if price is not None and taker_fee_a is not None and taker_fee_b is not None:
+        total_fee_rate = taker_fee_a + taker_fee_b
+        fee_cost = price * total_fee_rate
+        
+        net_data = clean_data - fee_cost
+        
+        stats.update({
+            'net_mean': net_data.mean(),
+            'net_std': net_data.std(),
+            'net_min': net_data.min(),
+            'net_max': net_data.max(),
+            'net_current': net_data.iloc[-1] if len(net_data) > 0 else None,
+            'net_median': net_data.median(),
+            'fee_cost': fee_cost,
+            'fee_pct': total_fee_rate * 100
+        })
+    
+    return stats
 
 
 def is_entry_signal(z_score: float, threshold: float = 2.0, 

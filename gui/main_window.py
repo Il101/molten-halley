@@ -260,9 +260,8 @@ class MainWindow(QMainWindow):
                 # Add to table
                 self.monitor_table.add_symbol(symbol)
                 
-                # If no symbol selected in chart, select this one
-                if self.zscore_chart.selected_symbol is None:
-                    self.zscore_chart.set_symbol(symbol)
+                # Always switch chart to newly added symbol
+                self.zscore_chart.set_symbol(symbol)
                 
                 self.status_bar.showMessage(f"Added {symbol} to monitoring")
                 self.logger.info(f"Subscribed to {symbol}")

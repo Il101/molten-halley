@@ -27,7 +27,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from core.ws_manager import WebSocketManager
 from core.event_bus import EventBus
-from utils.metrics import calculate_z_score
+from utils.metrics import calculate_z_score, calculate_net_spread
 from utils.logger import get_logger
 
 
@@ -53,6 +53,10 @@ class LiveMonitor:
         self.event_bus = EventBus.instance()
         self.config = self.ws_manager.config
         
+        # Load fee configuration
+        self.fee_bingx_taker = self.config['fees']['bingx']['taker']
+        self.fee_bybit_taker = self.config['fees']['bybit']['taker']
+        
         # Initialize CCXT exchanges for historical data
         self.bingx = ccxt.bingx({
             'enableRateLimit': True,
@@ -63,8 +67,9 @@ class LiveMonitor:
             'options': {'defaultType': 'linear'}
         })
         
-        # Spread history storage (symbol -> deque of historical spreads from 1m candles)
-        # This forms the BASELINE for Z-Score calculation
+        # Spread history storage (symbol -> deque of historical GROSS spreads from 1m candles)
+        # CRITICAL: This stores GROSS SPREAD (market data), not net spread
+        # Z-Score measures market anomaly, not profitability
         self.spread_history: Dict[str, deque] = {}
         self.history_length = 60  # 60 minutes of historical baseline
         
@@ -147,13 +152,13 @@ class LiveMonitor:
                 suffixes=('_bingx', '_bybit')
             )
             
-            # Calculate historical spreads: Close_BingX - Close_Bybit
-            df_merged['spread'] = df_merged['close_bingx'] - df_merged['close_bybit']
+            # Calculate historical GROSS spreads: Close_BingX - Close_Bybit
+            df_merged['gross_spread'] = df_merged['close_bingx'] - df_merged['close_bybit']
             
-            # Populate spread_history
-            historical_spreads = df_merged['spread'].tolist()
+            # Populate spread_history with GROSS spreads (market data)
+            historical_gross_spreads = df_merged['gross_spread'].tolist()
             self.spread_history[symbol] = deque(
-                historical_spreads,
+                historical_gross_spreads,
                 maxlen=self.history_length
             )
             
@@ -210,10 +215,12 @@ class LiveMonitor:
         """
         Check for arbitrage opportunity when we have prices from both exchanges.
         
-        HYBRID CALCULATION:
-        - Step A: Calculate current_spread from live ticks (Ask - Bid)
-        - Step A: Calculate Z-Score using historical baseline (spread_history)
-        - Step B: Once per minute, update the historical baseline
+        CORRECTED CALCULATION LOGIC:
+        - Step A: Calculate gross_spread from live ticks (market data)
+        - Step B: Calculate Z-Score using GROSS spread against historical GROSS baseline
+        - Step C: Calculate net_spread (gross_spread - fees) for profitability check
+        - Step D: Signal ONLY if Z-Score high AND net_spread > 0
+        - Step E: Once per minute, update the historical baseline with GROSS spread
         
         Args:
             symbol: Trading pair symbol
@@ -225,35 +232,57 @@ class LiveMonitor:
         if not bingx_price or not bybit_price:
             return
         
-        # === STEP A: LIVE CALCULATION ===
+        # === STEP A: CALCULATE GROSS SPREAD ===
         
         # Calculate current executable spread (buy on one, sell on other)
         # Spread = ask_A - bid_B (cost to execute arbitrage)
         spread_a_to_b = bingx_price['ask'] - bybit_price['bid']
         spread_b_to_a = bybit_price['ask'] - bingx_price['bid']
         
-        # Use the more favorable spread
-        current_spread = min(abs(spread_a_to_b), abs(spread_b_to_a))
+        # Use the more favorable spread (gross spread)
+        gross_spread = min(abs(spread_a_to_b), abs(spread_b_to_a))
         if spread_a_to_b < 0:
-            current_spread = -current_spread  # Negative spread means BingX cheaper
+            gross_spread = -gross_spread  # Negative spread means BingX cheaper
+        
+        # === STEP B: CALCULATE NET SPREAD (CRITICAL) ===
+        
+        # Calculate mid-price for fee calculation
+        mid_price = (bingx_price['last'] + bybit_price['last']) / 2.0
+        
+        # Calculate net spread after fees
+        net_spread_val, net_spread_pct, fee_cost = calculate_net_spread(
+            gross_spread=abs(gross_spread),
+            price=mid_price,
+            taker_fee_a=self.fee_bingx_taker,
+            taker_fee_b=self.fee_bybit_taker
+        )
+        
+        # Preserve sign of spread
+        if gross_spread < 0:
+            net_spread_val = -net_spread_val
+        
+        # Calculate gross spread percentage for display
+        gross_spread_pct = (abs(gross_spread) / mid_price) * 100 if mid_price > 0 else 0.0
         
         # Initialize position tracking if needed
         if symbol not in self.in_position:
             self.in_position[symbol] = False
+        
+        # === STEP B: CALCULATE Z-SCORE ON GROSS SPREAD ===
         
         # Check if we have historical baseline
         if symbol not in self.spread_history or len(self.spread_history[symbol]) < 10:
             # Not enough history yet, skip Z-Score calculation
             return
         
-        # Calculate Z-Score from historical baseline
+        # Calculate Z-Score from historical baseline using GROSS SPREAD
         try:
-            # Get mean and std from historical baseline
-            spreads = list(self.spread_history[symbol])
-            mean = sum(spreads) / len(spreads)
+            # Get mean and std from historical baseline (which contains GROSS spreads)
+            gross_spreads = list(self.spread_history[symbol])
+            mean = sum(gross_spreads) / len(gross_spreads)
             
             # Calculate standard deviation
-            variance = sum((x - mean) ** 2 for x in spreads) / len(spreads)
+            variance = sum((x - mean) ** 2 for x in gross_spreads) / len(gross_spreads)
             std_dev = variance ** 0.5
             
             # Handle zero standard deviation
@@ -261,14 +290,29 @@ class LiveMonitor:
                 self.logger.debug(f"{symbol}: Zero std deviation, setting Z-Score to 0")
                 z_score = 0.0
             else:
-                # Calculate Z-Score: (current_spread - baseline_mean) / baseline_std
-                z_score = (current_spread - mean) / std_dev
+                # CORRECTED: Calculate Z-Score using GROSS SPREAD (market anomaly)
+                # Z-Score = (current_gross_spread - baseline_mean) / baseline_std
+                z_score = (gross_spread - mean) / std_dev
+                self.logger.debug(
+                    f"{symbol}: Z-Score={z_score:.2f}, "
+                    f"gross_spread={gross_spread:.4f}, mean={mean:.4f}, std={std_dev:.4f}"
+                )
             
-            # Emit spread update
-            self.event_bus.emit_spread_update(symbol, current_spread, z_score)
+            # Emit comprehensive spread update with all values
+            self.event_bus.spread_updated.emit({
+                'symbol': symbol,
+                'gross_spread': gross_spread,
+                'gross_spread_pct': gross_spread_pct,
+                'fee_cost': fee_cost,
+                'fee_pct': (self.fee_bingx_taker + self.fee_bybit_taker) * 100,
+                'net_spread': net_spread_val,
+                'net_spread_pct': net_spread_pct,
+                'z_score': z_score,
+                'mid_price': mid_price
+            })
             
-            # Check for entry/exit signals
-            await self._check_signals(symbol, z_score, current_spread)
+            # Check for entry/exit signals (requires BOTH high Z-Score AND positive net spread)
+            await self._check_signals(symbol, z_score, net_spread_val, net_spread_pct)
             
         except ZeroDivisionError:
             self.logger.warning(f"{symbol}: ZeroDivisionError in Z-Score calculation")
@@ -277,47 +321,54 @@ class LiveMonitor:
             self.logger.error(f"{symbol}: Error calculating Z-Score: {e}")
             return
         
-        # === STEP B: HISTORY MAINTENANCE ===
+        # === STEP E: HISTORY MAINTENANCE ===
         
         # Update historical baseline once per minute
         current_time = time.time()
         time_since_update = current_time - self.last_history_update.get(symbol, 0)
         
         if time_since_update >= self.history_update_interval:
-            # Add current spread to history (this updates the baseline slowly)
-            self.spread_history[symbol].append(current_spread)
+            # CORRECTED: Add current GROSS spread to history (market data)
+            # Z-Score measures market anomaly, not profitability
+            self.spread_history[symbol].append(gross_spread)
             self.last_history_update[symbol] = current_time
             
             self.logger.debug(
-                f"{symbol}: Updated historical baseline "
+                f"{symbol}: Updated historical baseline with GROSS spread "
                 f"(size={len(self.spread_history[symbol])})"
             )
     
-    async def _check_signals(self, symbol: str, z_score: float, spread: float) -> None:
+    async def _check_signals(self, symbol: str, z_score: float, net_spread_val: float, net_spread_pct: float) -> None:
         """
         Check if entry or exit signal conditions are met.
         
+        CRITICAL: Signal requires TWO conditions:
+        1. Z-Score exceeds threshold (market anomaly)
+        2. Net spread is positive (profitable after fees)
+        
         Args:
             symbol: Trading pair symbol
-            z_score: Current Z-Score
-            spread: Current spread value
+            z_score: Current Z-Score (based on gross spread)
+            net_spread_val: Net spread value after fees
+            net_spread_pct: Net spread percentage after fees
         """
         z_entry = self.config['trading']['z_score_entry']
         z_exit = self.config['trading']['z_score_exit']
-        min_spread_pct = self.config['trading']['min_spread_pct']
         
-        # Calculate spread percentage (approximate, using BingX price as base)
-        bingx_price = self.price_cache['bingx'].get(symbol, {}).get('last', 1)
-        spread_pct = abs(spread) / bingx_price if bingx_price > 0 else 0
-        
-        # Entry signal: |Z-Score| > threshold AND spread > min required
+        # Entry signal: |Z-Score| > threshold AND net_spread_pct > 0 (profitable)
         if not self.in_position[symbol]:
-            if abs(z_score) > z_entry and spread_pct > min_spread_pct:
+            if abs(z_score) > z_entry and net_spread_pct > 0:
                 self.in_position[symbol] = True
                 self.event_bus.emit_signal_triggered(symbol, 'ENTRY', z_score)
                 self.logger.info(
                     f"🔔 ENTRY SIGNAL: {symbol} | Z-Score={z_score:.2f} | "
-                    f"Spread={spread_pct*100:.3f}%"
+                    f"Net Spread={net_spread_pct:.3f}% (Profitable!)"
+                )
+            elif abs(z_score) > z_entry and net_spread_pct <= 0:
+                # High Z-Score but unprofitable - log warning
+                self.logger.info(
+                    f"⚠️  HIGH Z-SCORE BUT UNPROFITABLE: {symbol} | Z-Score={z_score:.2f} | "
+                    f"Net Spread={net_spread_pct:.3f}% (Would lose money!)"
                 )
         
         # Exit signal: |Z-Score| < exit threshold
@@ -408,11 +459,22 @@ class LiveMonitor:
         # Calculate current spread
         spread_a_to_b = bingx_price['ask'] - bybit_price['bid']
         spread_b_to_a = bybit_price['ask'] - bingx_price['bid']
-        current_spread = min(abs(spread_a_to_b), abs(spread_b_to_a))
+        gross_spread = min(abs(spread_a_to_b), abs(spread_b_to_a))
         if spread_a_to_b < 0:
-            current_spread = -current_spread
+            gross_spread = -gross_spread
         
-        # Calculate Z-Score from historical baseline
+        # Calculate mid-price and net spread
+        mid_price = (bingx_price['last'] + bybit_price['last']) / 2.0
+        net_spread_val, net_spread_pct, fee_cost = calculate_net_spread(
+            gross_spread=abs(gross_spread),
+            price=mid_price,
+            taker_fee_a=self.fee_bingx_taker,
+            taker_fee_b=self.fee_bybit_taker
+        )
+        if gross_spread < 0:
+            net_spread_val = -net_spread_val
+        
+        # Calculate Z-Score from historical baseline (GROSS spreads)
         spreads = list(self.spread_history[symbol])
         mean = sum(spreads) / len(spreads)
         variance = sum((x - mean) ** 2 for x in spreads) / len(spreads)
@@ -421,11 +483,14 @@ class LiveMonitor:
         if std_dev == 0:
             z_score = 0.0
         else:
-            z_score = (current_spread - mean) / std_dev
+            # CORRECTED: Use gross spread for Z-Score
+            z_score = (gross_spread - mean) / std_dev
         
         return {
             'symbol': symbol,
-            'spread': current_spread,
+            'gross_spread': gross_spread,
+            'net_spread': net_spread_val,
+            'fee_cost': fee_cost,
             'z_score': z_score,
             'in_position': self.in_position.get(symbol, False),
             'history_length': len(self.spread_history[symbol]),

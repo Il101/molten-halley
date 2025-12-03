@@ -118,18 +118,23 @@ class ZScoreChart(QWidget):
         bus = EventBus.instance()
         bus.spread_updated.connect(self._on_spread_updated)
     
-    @pyqtSlot(str, float, float)
-    def _on_spread_updated(self, symbol: str, spread: float, zscore: float):
+    
+    @pyqtSlot(dict)
+    def _on_spread_updated(self, data: dict):
         """
         Handle spread update from EventBus.
         
         Only updates if symbol matches selected symbol.
         
         Args:
-            symbol: Trading pair symbol
-            spread: Spread value
-            zscore: Z-Score value
+            data: Dictionary with spread data including:
+                - symbol: Trading pair
+                - z_score: Z-Score value
         """
+        # Extract data from dictionary
+        symbol = data.get('symbol', '')
+        zscore = data.get('z_score', 0.0)
+        
         # Only update for selected symbol
         if self.selected_symbol is None or symbol != self.selected_symbol:
             return

@@ -1,5 +1,15 @@
 # ArbiBot Configuration
 
+# Trading Fees Configuration
+fees:
+  # Taker fees are used because arbitrage requires immediate execution
+  bingx:
+    taker: 0.0005  # 0.05%
+    maker: 0.0002  # 0.02%
+  bybit:
+    taker: 0.00055 # 0.055%
+    maker: 0.0002  # 0.02%
+
 # Trading parameters
 trading:
   # Z-Score thresholds
@@ -17,6 +27,12 @@ trading:
   
   # Time limits
   max_position_time: 3600      # Seconds (1 hour max per position)
+
+  # Trading Mode
+  mode: 'PAPER'  # 'PAPER' or 'LIVE'
+  paper_balance: 10000.0  # Starting balance for paper trading (USDT)
+  position_size_usdt: 100.0  # Fixed position size per trade
+  fee_rate: 0.0006  # 0.06% trading fee
   
 # Validation parameters
 validation:
@@ -42,11 +58,15 @@ exchanges:
     enabled: true
     default_type: 'swap'        # Perpetual futures
     testnet: false
+    api_key: ''  # For LIVE mode
+    api_secret: ''
   
   bybit:
     enabled: true
     default_type: 'linear'      # Linear perpetuals
     testnet: false
+    api_key: ''
+    api_secret: ''
 
 # WebSocket configuration
 websocket:
