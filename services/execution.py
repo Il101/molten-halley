@@ -221,7 +221,9 @@ class ExecutionEngine:
                 return False
             
             # Store trade metadata
-            self.active_trades[symbol] = {
+            # Store trade metadata
+            trade_data = {
+                'symbol': symbol,
                 'entry_time': datetime.now().isoformat(),
                 'entry_z_score': z_score,
                 'entry_spread': entry_spread,
@@ -229,8 +231,14 @@ class ExecutionEngine:
                 'order_b_id': order_b['id'],
                 'side_a': side_a,
                 'side_b': side_b,
-                'amount': amount
+                'amount': amount,
+                'entry_price_a': order_a.get('average', 0),
+                'entry_price_b': order_b.get('average', 0)
             }
+            self.active_trades[symbol] = trade_data
+            
+            # Emit signal for GUI
+            self.event_bus.emit_trade_opened(trade_data)
             
             self.logger.info(
                 f"✅ Arbitrage opened: {symbol} "
@@ -286,6 +294,14 @@ class ExecutionEngine:
                 f"P&L=${total_pnl:.2f}, "
                 f"Holding Time={holding_time:.0f}s"
             )
+            
+            # Emit signal for GUI
+            self.event_bus.emit_trade_closed({
+                'symbol': symbol,
+                'pnl': total_pnl,
+                'holding_time': holding_time,
+                'exit_time': datetime.now().isoformat()
+            })
             
             # Remove from active trades
             del self.active_trades[symbol]

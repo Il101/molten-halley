@@ -26,7 +26,11 @@ from gui.widgets.zscore_chart import ZScoreChart
 from gui.widgets.connection_status import ConnectionStatus
 from services.live_monitor import LiveMonitor
 from core.event_bus import EventBus
+from core.event_bus import EventBus
 from utils.logger import get_logger
+from core.exchange_factory import create_exchange_client
+from services.execution import ExecutionEngine
+from gui.widgets.active_trades import ActiveTradesWidget
 
 
 class MainWindow(QMainWindow):
@@ -50,6 +54,7 @@ class MainWindow(QMainWindow):
         self.logger = get_logger(__name__)
         self.live_monitor: Optional[LiveMonitor] = None
         self.monitor_task: Optional[asyncio.Task] = None
+        self.execution_engine: Optional[ExecutionEngine] = None
         
         # Setup UI
         self._setup_ui()
@@ -90,6 +95,11 @@ class MainWindow(QMainWindow):
         self.main_splitter.setSizes([840, 560])
         
         layout.addWidget(self.main_splitter)
+        
+        # Active Trades Widget (Bottom)
+        self.active_trades_widget = ActiveTradesWidget()
+        self.active_trades_widget.setMaximumHeight(200)
+        layout.addWidget(self.active_trades_widget)
         
         # Status bar
         self.status_bar = QStatusBar()
@@ -233,6 +243,9 @@ class MainWindow(QMainWindow):
             
             self.status_bar.showMessage(f"Monitoring {len(initial_symbols)} pair(s)...")
             self.logger.info(f"Started monitoring: {initial_symbols}")
+            
+            # Initialize Execution Engine
+            self._init_execution_engine()
             
         except Exception as e:
             self.logger.error(f"Error starting monitor: {e}", exc_info=True)
@@ -400,3 +413,29 @@ class MainWindow(QMainWindow):
             
         except Exception as e:
             self.logger.error(f"Error during shutdown: {e}", exc_info=True)
+    def _init_execution_engine(self):
+        """Initialize Execution Engine with Paper/Real clients."""
+        try:
+            config = self.live_monitor.config
+            mode = config.get('trading', {}).get('mode', 'PAPER')
+            
+            # Create clients
+            client_a = create_exchange_client(
+                'bingx', config, mode, self.live_monitor.ws_manager
+            )
+            client_b = create_exchange_client(
+                'bybit', config, mode, self.live_monitor.ws_manager
+            )
+            
+            # Create Engine
+            self.execution_engine = ExecutionEngine(
+                client_a, client_b,
+                position_size_usdt=config.get('trading', {}).get('position_size_usdt', 100.0)
+            )
+            
+            self.logger.info(f"Execution Engine initialized in {mode} mode")
+            self.status_bar.showMessage(f"Monitoring {len(self.pair_selector.get_active_pairs())} pairs | Trading: {mode}")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to init Execution Engine: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to init Execution Engine:\n{e}")
