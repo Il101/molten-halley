@@ -8,12 +8,13 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional
 from collections import deque
+import time
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, 
     QTableWidgetItem, QHeaderView, QSplitter
 )
-from PyQt6.QtCore import Qt, pyqtSlot
+from PyQt6.QtCore import Qt, pyqtSlot, QTimer
 from PyQt6.QtGui import QColor, QFont
 import pyqtgraph as pg
 
@@ -49,6 +50,15 @@ class Dashboard(QWidget):
         
         # Connect to EventBus
         self._connect_signals()
+        
+        # Data buffer for table updates
+        self.table_data_buffer: Dict[str, Dict] = {}
+        self.price_cache: Dict[str, float] = {}  # symbol -> bingx_price (for calculations)
+        
+        # Setup update timer (throttle UI updates to 10 FPS)
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self._refresh_ui)
+        self.update_timer.start(100)  # 100ms interval
     
     def _setup_ui(self):
         """Setup the user interface."""
@@ -88,6 +98,11 @@ class Dashboard(QWidget):
         self.chart.setLabel('left', 'Z-Score', color='w')
         self.chart.setLabel('bottom', 'Time', color='w')
         self.chart.showGrid(x=True, y=True, alpha=0.3)
+        
+        # Prevent auto-scaling from zooming in too much on noise
+        # This fixes the "jitter" when Z-score is small (e.g. 0.22)
+        self.chart.getViewBox().setLimits(minYRange=5)  # Always show at least range of 5 (e.g. -2.5 to 2.5)
+        
         self.chart.addLegend()
         
         # Add threshold lines
@@ -131,13 +146,17 @@ class Dashboard(QWidget):
         row = self.rows[symbol]
         exchange = data.get('exchange')
         
-        # Update price column
+        # Buffer data for table update
+        if symbol not in self.table_data_buffer:
+            self.table_data_buffer[symbol] = {}
+            
         if exchange == 'bingx':
             price = data.get('last', 0)
-            self.table.setItem(row, 1, self._create_item(f"${price:,.2f}"))
+            self.table_data_buffer[symbol]['bingx_price'] = price
+            self.price_cache[symbol] = price  # Update cache for calculations
         elif exchange == 'bybit':
             price = data.get('last', 0)
-            self.table.setItem(row, 2, self._create_item(f"${price:,.2f}"))
+            self.table_data_buffer[symbol]['bybit_price'] = price
     
     @pyqtSlot(str, float, float)
     def _on_spread_update(self, symbol: str, spread: float, z_score: float):
@@ -156,58 +175,103 @@ class Dashboard(QWidget):
         row = self.rows[symbol]
         
         # Calculate spread percentage (approximate)
-        # We'll use the BingX price as base if available
-        bingx_item = self.table.item(row, 1)
-        if bingx_item:
-            try:
-                bingx_price = float(bingx_item.text().replace('$', '').replace(',', ''))
-                spread_pct = (abs(spread) / bingx_price) * 100 if bingx_price > 0 else 0
-            except:
-                spread_pct = 0
+        # Use cached BingX price as base
+        bingx_price = self.price_cache.get(symbol, 0)
+        if bingx_price > 0:
+            spread_pct = (abs(spread) / bingx_price) * 100
         else:
             spread_pct = 0
         
         # Update spread %
-        spread_item = self._create_item(f"{spread_pct:.3f}%")
-        self.table.setItem(row, 3, spread_item)
+        # OPTIMIZATION: Buffer for timer update
+        # spread_item = self._create_item(f"{spread_pct:.3f}%")
+        # self.table.setItem(row, 3, spread_item)
         
         # Update Z-Score with color coding
-        z_score_item = self._create_item(f"{z_score:.2f}")
-        if z_score > 2:
-            z_score_item.setBackground(QColor(139, 0, 0))  # Dark red
-            z_score_item.setForeground(QColor(255, 255, 255))
-        elif z_score < -2:
-            z_score_item.setBackground(QColor(0, 100, 0))  # Dark green
-            z_score_item.setForeground(QColor(255, 255, 255))
-        else:
-            z_score_item.setBackground(QColor(30, 30, 30))
-            z_score_item.setForeground(QColor(200, 200, 200))
-        
-        self.table.setItem(row, 4, z_score_item)
-        
-        # Update status
-        if abs(z_score) > 2:
-            status = "🔔 SIGNAL"
-            status_item = self._create_item(status)
-            status_item.setForeground(QColor(255, 215, 0))  # Gold
-        else:
-            status = "⏸️ Waiting"
-            status_item = self._create_item(status)
-            status_item.setForeground(QColor(150, 150, 150))
-        
-        self.table.setItem(row, 5, status_item)
+        # ... (removed direct updates) ...
         
         # Store Z-Score history
         if symbol not in self.z_score_history:
             self.z_score_history[symbol] = deque(maxlen=self.max_history_points)
         
-        import time
         self.z_score_history[symbol].append((time.time(), z_score))
         
         # Update chart if this symbol is selected
-        if symbol == self.selected_symbol:
-            self._update_chart(symbol)
+        # OPTIMIZATION: Don't update chart here, let the timer handle it
+        # if symbol == self.selected_symbol:
+        #     self._update_chart(symbol)
     
+        # Store latest data for table update
+        if symbol not in self.table_data_buffer:
+            self.table_data_buffer[symbol] = {}
+        
+        self.table_data_buffer[symbol].update({
+            'spread_pct': spread_pct,
+            'z_score': z_score
+        })
+
+    def _refresh_ui(self):
+        """Timer slot to refresh UI (Chart + Table)."""
+        if not self.isVisible():
+            return
+
+        # 1. Update Chart
+        if self.selected_symbol:
+            self._update_chart(self.selected_symbol)
+            
+        # 2. Update Table
+        for symbol, data in self.table_data_buffer.items():
+            if symbol not in self.rows:
+                continue
+                
+            row = self.rows[symbol]
+            
+            # Update prices
+            if 'bingx_price' in data:
+                self._update_item_text(row, 1, f"${data['bingx_price']:,.2f}")
+            if 'bybit_price' in data:
+                self._update_item_text(row, 2, f"${data['bybit_price']:,.2f}")
+                
+            # Update spread/z-score
+            if 'spread_pct' in data:
+                self._update_item_text(row, 3, f"{data['spread_pct']:.3f}%")
+            
+            if 'z_score' in data:
+                z_score = data['z_score']
+                self._update_item_text(row, 4, f"{z_score:.2f}")
+                
+                # Update colors
+                item = self.table.item(row, 4)
+                if item:
+                    if z_score > 2:
+                        item.setBackground(QColor(139, 0, 0))
+                        item.setForeground(QColor(255, 255, 255))
+                    elif z_score < -2:
+                        item.setBackground(QColor(0, 100, 0))
+                        item.setForeground(QColor(255, 255, 255))
+                    else:
+                        item.setBackground(QColor(30, 30, 30))
+                        item.setForeground(QColor(200, 200, 200))
+                
+                # Update status
+                if abs(z_score) > 2:
+                    status = "🔔 SIGNAL"
+                    color = QColor(255, 215, 0)
+                else:
+                    status = "⏸️ Waiting"
+                    color = QColor(150, 150, 150)
+                
+                self._update_item_text(row, 5, status)
+                item = self.table.item(row, 5)
+                if item:
+                    item.setForeground(color)
+        
+        # Clear buffer after update? 
+        # No, keep it so we don't flicker if no new data comes, 
+        # but actually we only want to update if CHANGED.
+        # But for simplicity, we can just clear it to avoid re-setting same text.
+        self.table_data_buffer.clear()
+
     @pyqtSlot(str, bool)
     def _on_connection_status(self, exchange: str, connected: bool):
         """
@@ -254,6 +318,18 @@ class Dashboard(QWidget):
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
         return item
+
+    def _update_item_text(self, row: int, col: int, text: str):
+        """
+        Update text of an existing item, or create if missing.
+        Avoids creating new objects if possible.
+        """
+        item = self.table.item(row, col)
+        if item:
+            if item.text() != text:
+                item.setText(text)
+        else:
+            self.table.setItem(row, col, self._create_item(text))
     
     def _on_selection_changed(self):
         """Handle table row selection change."""

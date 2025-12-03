@@ -3,6 +3,11 @@ Live Monitor Service
 
 Consumes real-time WebSocket price feeds and calculates live Z-Scores for arbitrage monitoring.
 Detects entry/exit signals and emits events via EventBus.
+
+HYBRID APPROACH:
+- Pre-loads 60 minutes of historical 1-minute candles to establish baseline spread statistics
+- Calculates real-time Z-Scores by comparing live tick spreads against historical baseline
+- Updates historical baseline once per minute to keep it moving forward slowly
 """
 
 import asyncio
@@ -12,8 +17,10 @@ from typing import Dict, List, Optional
 from collections import deque
 from datetime import datetime
 import signal
+import time
 
 import pandas as pd
+import ccxt.async_support as ccxt
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -26,10 +33,10 @@ from utils.logger import get_logger
 
 class LiveMonitor:
     """
-    Real-time arbitrage monitoring service.
+    Real-time arbitrage monitoring service with hybrid Z-Score calculation.
     
-    Consumes WebSocket price feeds, calculates spreads and Z-Scores,
-    and emits trading signals when thresholds are crossed.
+    Consumes WebSocket price feeds, calculates spreads and Z-Scores against
+    historical baseline, and emits trading signals when thresholds are crossed.
     """
     
     def __init__(self, config_path: str = 'config/config.yaml'):
@@ -46,10 +53,24 @@ class LiveMonitor:
         self.event_bus = EventBus.instance()
         self.config = self.ws_manager.config
         
-        # Spread history storage (symbol -> deque of spreads)
-        z_window = self.config['validation']['z_score_window']
+        # Initialize CCXT exchanges for historical data
+        self.bingx = ccxt.bingx({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'swap'}
+        })
+        self.bybit = ccxt.bybit({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'linear'}
+        })
+        
+        # Spread history storage (symbol -> deque of historical spreads from 1m candles)
+        # This forms the BASELINE for Z-Score calculation
         self.spread_history: Dict[str, deque] = {}
-        self.max_history_length = z_window * 2  # Store 2x window for better stats
+        self.history_length = 60  # 60 minutes of historical baseline
+        
+        # Track last history update time for each symbol
+        self.last_history_update: Dict[str, float] = {}
+        self.history_update_interval = 60  # Update once per minute (seconds)
         
         # Price cache for pairing
         self.price_cache: Dict[str, Dict[str, dict]] = {
@@ -64,7 +85,96 @@ class LiveMonitor:
         self.running = False
         self.monitor_task: Optional[asyncio.Task] = None
         
-        self.logger.info("LiveMonitor initialized")
+        self.logger.info("LiveMonitor initialized with hybrid Z-Score approach")
+    
+    async def _preload_history(self, symbol: str) -> None:
+        """
+        Pre-load historical 1-minute candles for baseline spread calculation.
+        
+        Fetches the last 60 candles (1m timeframe) from both exchanges,
+        calculates historical spreads, and populates spread_history.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., 'BTC/USDT')
+        """
+        try:
+            self.logger.info(f"Pre-loading 60 minutes of history for {symbol}...")
+            
+            # Fetch 1-minute candles from both exchanges
+            # Format: [[timestamp, open, high, low, close, volume], ...]
+            bingx_candles = await self.bingx.fetch_ohlcv(
+                symbol=symbol,
+                timeframe='1m',
+                limit=60
+            )
+            
+            bybit_candles = await self.bybit.fetch_ohlcv(
+                symbol=symbol,
+                timeframe='1m',
+                limit=60
+            )
+            
+            # Ensure we have data from both exchanges
+            if not bingx_candles or not bybit_candles:
+                self.logger.warning(
+                    f"Failed to fetch candles for {symbol}. "
+                    f"BingX: {len(bingx_candles) if bingx_candles else 0}, "
+                    f"Bybit: {len(bybit_candles) if bybit_candles else 0}"
+                )
+                # Fallback: start with empty deque
+                self.spread_history[symbol] = deque(maxlen=self.history_length)
+                self.last_history_update[symbol] = time.time()
+                return
+            
+            # Convert to DataFrames for easier processing
+            df_bingx = pd.DataFrame(
+                bingx_candles,
+                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            )
+            df_bybit = pd.DataFrame(
+                bybit_candles,
+                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            )
+            
+            # Align by timestamp (use inner join to ensure matching timestamps)
+            df_bingx['time'] = pd.to_datetime(df_bingx['timestamp'], unit='ms')
+            df_bybit['time'] = pd.to_datetime(df_bybit['timestamp'], unit='ms')
+            
+            df_merged = pd.merge(
+                df_bingx[['time', 'close']],
+                df_bybit[['time', 'close']],
+                on='time',
+                suffixes=('_bingx', '_bybit')
+            )
+            
+            # Calculate historical spreads: Close_BingX - Close_Bybit
+            df_merged['spread'] = df_merged['close_bingx'] - df_merged['close_bybit']
+            
+            # Populate spread_history
+            historical_spreads = df_merged['spread'].tolist()
+            self.spread_history[symbol] = deque(
+                historical_spreads,
+                maxlen=self.history_length
+            )
+            
+            # Set initial update time
+            self.last_history_update[symbol] = time.time()
+            
+            self.logger.info(
+                f"✅ Pre-loaded 60 minutes of history for {symbol}. "
+                f"Got {len(self.spread_history[symbol])} spread values. "
+                f"Initial Z-Score parameters set."
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error pre-loading history for {symbol}: {e}")
+            # Fallback: start with empty deque and build gradually
+            self.spread_history[symbol] = deque(maxlen=self.history_length)
+            self.last_history_update[symbol] = time.time()
+            self.logger.warning(
+                f"Starting with empty history for {symbol}. "
+                f"Will build baseline slowly."
+            )
     
     async def _process_price_updates(self) -> None:
         """
@@ -100,6 +210,11 @@ class LiveMonitor:
         """
         Check for arbitrage opportunity when we have prices from both exchanges.
         
+        HYBRID CALCULATION:
+        - Step A: Calculate current_spread from live ticks (Ask - Bid)
+        - Step A: Calculate Z-Score using historical baseline (spread_history)
+        - Step B: Once per minute, update the historical baseline
+        
         Args:
             symbol: Trading pair symbol
         """
@@ -110,45 +225,73 @@ class LiveMonitor:
         if not bingx_price or not bybit_price:
             return
         
-        # Calculate executable spread (buy on one, sell on other)
+        # === STEP A: LIVE CALCULATION ===
+        
+        # Calculate current executable spread (buy on one, sell on other)
         # Spread = ask_A - bid_B (cost to execute arbitrage)
         spread_a_to_b = bingx_price['ask'] - bybit_price['bid']
         spread_b_to_a = bybit_price['ask'] - bingx_price['bid']
         
         # Use the more favorable spread
-        spread = min(abs(spread_a_to_b), abs(spread_b_to_a))
+        current_spread = min(abs(spread_a_to_b), abs(spread_b_to_a))
         if spread_a_to_b < 0:
-            spread = -spread  # Negative spread means BingX cheaper
+            current_spread = -current_spread  # Negative spread means BingX cheaper
         
-        # Initialize spread history for this symbol if needed
-        if symbol not in self.spread_history:
-            self.spread_history[symbol] = deque(maxlen=self.max_history_length)
+        # Initialize position tracking if needed
+        if symbol not in self.in_position:
             self.in_position[symbol] = False
         
-        # Store spread
-        self.spread_history[symbol].append(spread)
+        # Check if we have historical baseline
+        if symbol not in self.spread_history or len(self.spread_history[symbol]) < 10:
+            # Not enough history yet, skip Z-Score calculation
+            return
         
-        # Calculate Z-Score if we have enough history
-        if len(self.spread_history[symbol]) >= self.config['validation']['z_score_window']:
-            spread_series = pd.Series(list(self.spread_history[symbol]))
-            z_score_series = calculate_z_score(
-                spread_series,
-                window=self.config['validation']['z_score_window']
+        # Calculate Z-Score from historical baseline
+        try:
+            # Get mean and std from historical baseline
+            spreads = list(self.spread_history[symbol])
+            mean = sum(spreads) / len(spreads)
+            
+            # Calculate standard deviation
+            variance = sum((x - mean) ** 2 for x in spreads) / len(spreads)
+            std_dev = variance ** 0.5
+            
+            # Handle zero standard deviation
+            if std_dev == 0:
+                self.logger.debug(f"{symbol}: Zero std deviation, setting Z-Score to 0")
+                z_score = 0.0
+            else:
+                # Calculate Z-Score: (current_spread - baseline_mean) / baseline_std
+                z_score = (current_spread - mean) / std_dev
+            
+            # Emit spread update
+            self.event_bus.emit_spread_update(symbol, current_spread, z_score)
+            
+            # Check for entry/exit signals
+            await self._check_signals(symbol, z_score, current_spread)
+            
+        except ZeroDivisionError:
+            self.logger.warning(f"{symbol}: ZeroDivisionError in Z-Score calculation")
+            z_score = 0.0
+        except Exception as e:
+            self.logger.error(f"{symbol}: Error calculating Z-Score: {e}")
+            return
+        
+        # === STEP B: HISTORY MAINTENANCE ===
+        
+        # Update historical baseline once per minute
+        current_time = time.time()
+        time_since_update = current_time - self.last_history_update.get(symbol, 0)
+        
+        if time_since_update >= self.history_update_interval:
+            # Add current spread to history (this updates the baseline slowly)
+            self.spread_history[symbol].append(current_spread)
+            self.last_history_update[symbol] = current_time
+            
+            self.logger.debug(
+                f"{symbol}: Updated historical baseline "
+                f"(size={len(self.spread_history[symbol])})"
             )
-            
-            # Get current Z-Score (last value)
-            current_z_score = z_score_series.iloc[-1]
-            
-            if pd.notna(current_z_score):
-                # Emit spread update
-                self.event_bus.emit_spread_update(symbol, spread, current_z_score)
-                
-                # Check for entry/exit signals
-                await self._check_signals(symbol, current_z_score, spread)
-                
-                self.logger.debug(
-                    f"{symbol}: Spread={spread:.2f}, Z-Score={current_z_score:.2f}"
-                )
     
     async def _check_signals(self, symbol: str, z_score: float, spread: float) -> None:
         """
@@ -190,11 +333,17 @@ class LiveMonitor:
         """
         Start live monitoring for given symbols.
         
+        Pre-loads historical data before starting WebSocket monitoring.
+        
         Args:
             symbols: List of trading pair symbols to monitor
         """
         self.running = True
         self.logger.info(f"Starting LiveMonitor for {len(symbols)} symbols")
+        
+        # Pre-load historical data for all symbols
+        for symbol in symbols:
+            await self._preload_history(symbol)
         
         # Start WebSocket manager
         await self.ws_manager.start(symbols)
@@ -202,7 +351,7 @@ class LiveMonitor:
         # Start price processing task
         self.monitor_task = asyncio.create_task(self._process_price_updates())
         
-        self.logger.info("LiveMonitor started")
+        self.logger.info("LiveMonitor started with hybrid Z-Score calculation")
     
     async def stop(self) -> None:
         """
@@ -222,9 +371,14 @@ class LiveMonitor:
             except asyncio.CancelledError:
                 pass
         
+        # Close CCXT exchanges
+        await self.bingx.close()
+        await self.bybit.close()
+        
         # Clear buffers
         self.spread_history.clear()
         self.price_cache = {'bingx': {}, 'bybit': {}}
+        self.last_history_update.clear()
         
         self.logger.info("LiveMonitor stopped")
     
@@ -241,24 +395,42 @@ class LiveMonitor:
         if symbol not in self.spread_history:
             return None
         
-        if len(self.spread_history[symbol]) < self.config['validation']['z_score_window']:
+        if len(self.spread_history[symbol]) < 10:
             return None
         
-        spread_series = pd.Series(list(self.spread_history[symbol]))
-        z_score_series = calculate_z_score(
-            spread_series,
-            window=self.config['validation']['z_score_window']
-        )
+        # Get current prices
+        bingx_price = self.price_cache['bingx'].get(symbol)
+        bybit_price = self.price_cache['bybit'].get(symbol)
         
-        current_z_score = z_score_series.iloc[-1]
-        current_spread = spread_series.iloc[-1]
+        if not bingx_price or not bybit_price:
+            return None
+        
+        # Calculate current spread
+        spread_a_to_b = bingx_price['ask'] - bybit_price['bid']
+        spread_b_to_a = bybit_price['ask'] - bingx_price['bid']
+        current_spread = min(abs(spread_a_to_b), abs(spread_b_to_a))
+        if spread_a_to_b < 0:
+            current_spread = -current_spread
+        
+        # Calculate Z-Score from historical baseline
+        spreads = list(self.spread_history[symbol])
+        mean = sum(spreads) / len(spreads)
+        variance = sum((x - mean) ** 2 for x in spreads) / len(spreads)
+        std_dev = variance ** 0.5
+        
+        if std_dev == 0:
+            z_score = 0.0
+        else:
+            z_score = (current_spread - mean) / std_dev
         
         return {
             'symbol': symbol,
             'spread': current_spread,
-            'z_score': current_z_score,
+            'z_score': z_score,
             'in_position': self.in_position.get(symbol, False),
-            'history_length': len(self.spread_history[symbol])
+            'history_length': len(self.spread_history[symbol]),
+            'baseline_mean': mean,
+            'baseline_std': std_dev
         }
 
 
@@ -266,7 +438,7 @@ async def main():
     """CLI interface for testing LiveMonitor."""
     import argparse
     
-    parser = argparse.ArgumentParser(description='Live Arbitrage Monitor')
+    parser = argparse.ArgumentParser(description='Live Arbitrage Monitor (Hybrid Z-Score)')
     parser.add_argument(
         'symbols',
         nargs='*',
@@ -300,13 +472,13 @@ async def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Start monitoring
+    # Start monitoring (includes pre-loading history)
     await monitor.start(args.symbols)
     
     print(f"\n{'='*70}")
-    print(f"Live Arbitrage Monitor - {', '.join(args.symbols)}")
+    print(f"Live Arbitrage Monitor (Hybrid Z-Score) - {', '.join(args.symbols)}")
     print(f"{'='*70}\n")
-    print("Waiting for data...\n")
+    print("Pre-loaded historical baseline. Monitoring live ticks...\n")
     
     # Stats display loop
     try:
@@ -326,10 +498,12 @@ async def main():
                         f"{symbol:12} | "
                         f"Spread: {stats['spread']:8.2f} | "
                         f"Z-Score: {stats['z_score']:6.2f} | "
+                        f"Baseline μ={stats['baseline_mean']:.2f} σ={stats['baseline_std']:.2f} | "
                         f"{position_indicator}"
                     )
                 else:
-                    print(f"{symbol:12} | Collecting data... ({monitor.spread_history.get(symbol, deque()).__len__()} samples)")
+                    history_len = len(monitor.spread_history.get(symbol, deque()))
+                    print(f"{symbol:12} | Building baseline... ({history_len}/60 samples)")
             
             print(f"{'-'*70}")
     

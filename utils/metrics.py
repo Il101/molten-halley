@@ -50,6 +50,34 @@ def calculate_z_score(data: pd.Series, window: int = 20) -> pd.Series:
     return z_score
 
 
+def calculate_latest_z_score(data: list, window: int = 20) -> float:
+    """
+    Calculate Z-Score ONLY for the last element using the latest window.
+    Optimized for real-time performance using NumPy.
+    
+    Args:
+        data: List of values (must have at least 'window' elements)
+        window: Rolling window size
+        
+    Returns:
+        Z-Score of the last element
+    """
+    if len(data) < window:
+        return np.nan
+        
+    # Take only the relevant window
+    window_data = np.array(data[-window:])
+    
+    mean = np.mean(window_data)
+    std = np.std(window_data, ddof=1)  # Sample standard deviation
+    
+    if std == 0:
+        return np.nan
+        
+    last_val = window_data[-1]
+    return (last_val - mean) / std
+
+
 def adf_test(series: pd.Series, significance_level: float = 0.05) -> Tuple[bool, float, dict]:
     """
     Perform Augmented Dickey-Fuller test for stationarity.
