@@ -22,6 +22,7 @@ import yaml
 sys.path.append(str(Path(__file__).parent.parent))
 
 from utils.logger import get_logger
+from core.event_bus import EventBus
 
 
 class WebSocketManager:
@@ -76,6 +77,9 @@ class WebSocketManager:
         self.active_symbols: set = set()
         
         self.logger.info("WebSocketManager initialized")
+        
+        # Get EventBus instance for connection status updates
+        self.event_bus = EventBus.instance()
     
     def _load_config(self, config_path: str) -> dict:
         """
@@ -150,6 +154,9 @@ class WebSocketManager:
                         self.connections[exchange_name] = ws
                         self.connection_status[exchange_name] = True
                         self.logger.info(f"Connected to {exchange_name}")
+                        
+                        # Emit connection status
+                        self.event_bus.emit_connection_status(exchange_name, True)
                         
                         # STATE RECOVERY: Resubscribe to all active symbols after reconnection
                         if self.active_symbols:
@@ -231,14 +238,17 @@ class WebSocketManager:
                         # Connection closed
                         heartbeat_task.cancel()
                         self.connection_status[exchange_name] = False
+                        self.event_bus.emit_connection_status(exchange_name, False)
                         
             except aiohttp.ClientError as e:
                 self.logger.error(f"Connection error to {exchange_name}: {e}")
                 self.connection_status[exchange_name] = False
+                self.event_bus.emit_connection_status(exchange_name, False)
                 
             except Exception as e:
                 self.logger.error(f"Unexpected error with {exchange_name}: {e}")
                 self.connection_status[exchange_name] = False
+                self.event_bus.emit_connection_status(exchange_name, False)
             
             # Reconnect logic
             if self.running:
