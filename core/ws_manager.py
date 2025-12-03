@@ -65,11 +65,15 @@ class WebSocketManager:
         self.tasks: List[asyncio.Task] = []
         self.running = False
         
-        # Subscription tracking
+        # Subscription tracking (exchange-specific format)
         self.subscribed_symbols: Dict[str, List[str]] = {
             'bingx': [],
             'bybit': []
         }
+        
+        # Active symbols tracking (normalized format: BTC/USDT)
+        # This set tracks which symbols should be subscribed across all exchanges
+        self.active_symbols: set = set()
         
         self.logger.info("WebSocketManager initialized")
     
@@ -120,14 +124,14 @@ class WebSocketManager:
     async def connect_exchange(
         self,
         exchange_name: str,
-        symbols: List[str]
+        symbols: List[str] = None
     ) -> None:
         """
         Establish WebSocket connection to an exchange with auto-reconnect.
         
         Args:
             exchange_name: Exchange identifier ('bingx' or 'bybit')
-            symbols: List of symbols to subscribe to
+            symbols: Optional list of symbols (deprecated, use active_symbols)
         """
         ws_config = self.config['websocket'][exchange_name]
         url = ws_config['url']
@@ -147,8 +151,13 @@ class WebSocketManager:
                         self.connection_status[exchange_name] = True
                         self.logger.info(f"Connected to {exchange_name}")
                         
-                        # Subscribe to symbols
-                        await self._subscribe_symbols(exchange_name, ws, symbols)
+                        # STATE RECOVERY: Resubscribe to all active symbols after reconnection
+                        if self.active_symbols:
+                            symbols_list = list(self.active_symbols)
+                            self.logger.info(
+                                f"State recovery: Resubscribing to {len(symbols_list)} symbols on {exchange_name}"
+                            )
+                            await self._subscribe_symbols(exchange_name, ws, symbols_list)
                         
                         # Start heartbeat task
                         heartbeat_task = asyncio.create_task(
@@ -158,11 +167,17 @@ class WebSocketManager:
                         
                         # Message processing loop
                         async for msg in ws:
-                            # Handle TEXT messages (Bybit JSON, BingX Pong)
+                            # Handle TEXT messages (Bybit JSON, BingX Pong/Ping)
                             if msg.type == WSMsgType.TEXT:
-                                # Check if it's a raw "Pong" or "Ping" echo from BingX
-                                if msg.data.strip().lower() in ["pong", "ping"]:
-                                    self.logger.debug(f"Received heartbeat from {exchange_name}: {msg.data}")
+                                # Check if it's a server ping from BingX - respond with Pong
+                                if msg.data.strip().lower() == "ping":
+                                    await ws.send_str("Pong")
+                                    self.logger.debug(f"Received Ping from {exchange_name}, sent Pong")
+                                    continue
+                                
+                                # Check if it's our own Pong echo
+                                if msg.data.strip().lower() == "pong":
+                                    self.logger.debug(f"Received Pong echo from {exchange_name}")
                                     continue
                                 
                                 # Otherwise parse as JSON
@@ -180,9 +195,15 @@ class WebSocketManager:
                                     # Decompress GZIP data
                                     decompressed = gzip.decompress(msg.data).decode('utf-8').strip()
                                     
-                                    # Check if it's a raw "Pong" or "Ping" echo or empty
-                                    if not decompressed or decompressed.lower() in ["pong", "ping"]:
-                                        self.logger.debug(f"Received heartbeat from {exchange_name}: {decompressed}")
+                                    # Check if it's a server ping from BingX - respond with Pong
+                                    if decompressed.lower() == "ping":
+                                        await ws.send_str("Pong")
+                                        self.logger.debug(f"Received Ping (binary) from {exchange_name}, sent Pong")
+                                        continue
+                                    
+                                    # Check if it's a Pong echo or empty
+                                    if not decompressed or decompressed.lower() == "pong":
+                                        self.logger.debug(f"Received Pong/empty from {exchange_name}")
                                         continue
                                     
                                     # Try to parse as JSON
@@ -410,43 +431,80 @@ class WebSocketManager:
     
     async def subscribe(self, symbols: List[str]) -> None:
         """
-        Subscribe to additional symbols on active connections.
+        Dynamically subscribe to additional symbols on active connections.
         
         Args:
-            symbols: List of symbols to subscribe to
+            symbols: List of normalized symbols (e.g., ["BTC/USDT", "ETH/USDT"])
         """
+        if not symbols:
+            return
+        
+        # Update active symbols set
+        new_symbols = set(symbols) - self.active_symbols
+        if not new_symbols:
+            self.logger.debug(f"All symbols already subscribed: {symbols}")
+            return
+        
+        self.active_symbols.update(new_symbols)
+        self.logger.info(f"Adding {len(new_symbols)} symbols to active subscriptions: {list(new_symbols)}")
+        
+        # Subscribe on all active connections
         for exchange_name, ws in self.connections.items():
-            if not ws.closed:
-                await self._subscribe_symbols(exchange_name, ws, symbols)
+            if not ws.closed and self.connection_status.get(exchange_name, False):
+                try:
+                    await self._subscribe_symbols(exchange_name, ws, list(new_symbols))
+                    self.logger.info(f"Successfully subscribed to {len(new_symbols)} symbols on {exchange_name}")
+                except Exception as e:
+                    self.logger.error(f"Failed to subscribe on {exchange_name}: {e}")
     
     async def unsubscribe(self, symbols: List[str]) -> None:
         """
-        Unsubscribe from symbols.
+        Dynamically unsubscribe from symbols.
         
         Args:
-            symbols: List of symbols to unsubscribe from
+            symbols: List of normalized symbols to unsubscribe from (e.g., ["BTC/USDT"])
         """
+        if not symbols:
+            return
+        
+        # Remove from active symbols set
+        symbols_to_remove = set(symbols) & self.active_symbols
+        if not symbols_to_remove:
+            self.logger.debug(f"Symbols not in active subscriptions: {symbols}")
+            return
+        
+        self.active_symbols -= symbols_to_remove
+        self.logger.info(f"Removing {len(symbols_to_remove)} symbols from active subscriptions: {list(symbols_to_remove)}")
+        
+        # Unsubscribe from all active connections
         for exchange_name, ws in self.connections.items():
-            if not ws.closed:
-                if exchange_name == 'bingx':
-                    for symbol in symbols:
-                        bingx_symbol = symbol.replace('/', '-')
+            if not ws.closed and self.connection_status.get(exchange_name, False):
+                try:
+                    if exchange_name == 'bingx':
+                        # BingX unsubscription format
+                        for symbol in symbols_to_remove:
+                            bingx_symbol = symbol.replace('/', '-')
+                            unsub_msg = {
+                                "id": f"unsub_{bingx_symbol}",
+                                "reqType": "unsub",
+                                "dataType": f"{bingx_symbol}@ticker"
+                            }
+                            await ws.send_json(unsub_msg)
+                            self.logger.debug(f"Sent unsubscribe for {bingx_symbol} on BingX")
+                    
+                    elif exchange_name == 'bybit':
+                        # Bybit unsubscription format (batched)
+                        bybit_symbols = [symbol.replace('/', '') for symbol in symbols_to_remove]
                         unsub_msg = {
-                            "id": f"unsub_{bingx_symbol}",
-                            "reqType": "unsub",
-                            "dataType": f"{bingx_symbol}@ticker"
+                            "op": "unsubscribe",
+                            "args": [f"tickers.{s}" for s in bybit_symbols]
                         }
                         await ws.send_json(unsub_msg)
-                
-                elif exchange_name == 'bybit':
-                    bybit_symbols = [symbol.replace('/', '') for symbol in symbols]
-                    unsub_msg = {
-                        "op": "unsubscribe",
-                        "args": [f"tickers.{s}" for s in bybit_symbols]
-                    }
-                    await ws.send_json(unsub_msg)
-                
-                self.logger.info(f"Unsubscribed from {len(symbols)} symbols on {exchange_name}")
+                        self.logger.debug(f"Sent unsubscribe for {len(bybit_symbols)} symbols on Bybit")
+                    
+                    self.logger.info(f"Successfully unsubscribed from {len(symbols_to_remove)} symbols on {exchange_name}")
+                except Exception as e:
+                    self.logger.error(f"Failed to unsubscribe on {exchange_name}: {e}")
     
     def get_queue(self) -> asyncio.Queue:
         """
@@ -484,16 +542,20 @@ class WebSocketManager:
         Start WebSocket connections for all enabled exchanges.
         
         Args:
-            symbols: List of symbols to monitor
+            symbols: List of normalized symbols to monitor (e.g., ["BTC/USDT"])
         """
         self.running = True
-        self.logger.info(f"Starting WebSocket Manager for {len(symbols)} symbols")
+        
+        # Initialize active symbols
+        self.active_symbols = set(symbols)
+        self.logger.info(f"Starting WebSocket Manager for {len(symbols)} symbols: {symbols}")
         
         # Start connection tasks for each exchange
+        # Note: connect_exchange will auto-subscribe to active_symbols on connection
         for exchange_name in ['bingx', 'bybit']:
             if self.config['websocket'].get(exchange_name, {}).get('enabled', True):
                 task = asyncio.create_task(
-                    self.connect_exchange(exchange_name, symbols)
+                    self.connect_exchange(exchange_name)
                 )
                 self.tasks.append(task)
         
