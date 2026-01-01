@@ -55,19 +55,32 @@ class LiveMonitor:
         self.config = self.ws_manager.config
         self.resolver = SymbolResolver(self.config)
         
-        # Load fee configuration
-        self.fee_bingx_taker = self.config['fees']['bingx']['taker']
-        self.fee_bybit_taker = self.config['fees']['bybit']['taker']
+        # Initialize CCXT exchanges for all supported platforms
+        self.supported_exchanges = {'bingx', 'bybit', 'bitget', 'gateio', 'htx', 'phemex', 'mexc'}
+        self.exchange_clients: Dict[str, ccxt.Exchange] = {}
         
-        # Initialize CCXT exchanges for historical data
-        self.bingx = ccxt.bingx({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'swap'}
-        })
-        self.bybit = ccxt.bybit({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'linear'}
-        })
+        # Mapping of exchange IDs to their CCXT classes and options
+        exchange_configs = {
+            'bingx': (ccxt.bingx, {'options': {'defaultType': 'swap'}}),
+            'bybit': (ccxt.bybit, {'options': {'defaultType': 'linear'}}),
+            'bitget': (ccxt.bitget, {'options': {'defaultType': 'swap'}}),
+            'gateio': (ccxt.gateio, {'options': {'defaultType': 'swap'}}),
+            'htx': (ccxt.htx, {'options': {'defaultType': 'swap'}}),
+            'phemex': (ccxt.phemex, {'options': {'defaultType': 'swap'}}),
+            'mexc': (ccxt.mexc, {'options': {'defaultType': 'swap'}})
+        }
+        
+        for ex_id, (ex_class, options) in exchange_configs.items():
+            self.exchange_clients[ex_id] = ex_class({
+                'enableRateLimit': True,
+                **options
+            })
+        
+        # Fees storage: exchange_id -> {'taker': float, 'maker': float}
+        self.fees: Dict[str, Dict[str, float]] = {
+            ex_id: self.config['fees'].get(ex_id, {'taker': 0.0006, 'maker': 0.0002})
+            for ex_id in self.supported_exchanges
+        }
         
         # Spread history storage (symbol -> deque of historical GROSS spreads from 1m candles)
         # CRITICAL: This stores GROSS SPREAD (market data), not net spread
@@ -79,11 +92,12 @@ class LiveMonitor:
         self.last_history_update: Dict[str, float] = {}
         self.history_update_interval = 60  # Update once per minute (seconds)
         
-        # Price cache for pairing (currently only BingX vs Bybit is supported)
-        self.supported_exchanges = {'bingx', 'bybit'}
+        # Track active exchange pairs for each symbol
+        self.active_pairs: Dict[str, tuple] = {}  # symbol -> (ex_a, ex_b)
+        
+        # Price cache for all exchanges
         self.price_cache: Dict[str, Dict[str, dict]] = {
-            'bingx': {},
-            'bybit': {}
+            ex: {} for ex in self.supported_exchanges
         }
         
         # Signal state tracking
@@ -95,39 +109,45 @@ class LiveMonitor:
         
         self.logger.info("LiveMonitor initialized with hybrid Z-Score approach")
     
-    async def _preload_history(self, symbol: str) -> None:
+    async def _preload_history(self, symbol: str, ex_a: str = 'bingx', ex_b: str = 'bybit') -> None:
         """
         Pre-load historical 1-minute candles for baseline spread calculation.
         
-        Fetches the last 60 candles (1m timeframe) from both exchanges,
-        calculates historical spreads, and populates spread_history.
-        
         Args:
             symbol: Trading pair symbol (e.g., 'BTC/USDT')
+            ex_a: First exchange ID
+            ex_b: Second exchange ID
         """
         try:
-            self.logger.info(f"Pre-loading 60 minutes of history for {symbol}...")
+            self.logger.info(f"Pre-loading 60 minutes of history for {symbol} on {ex_a} and {ex_b}...")
             
+            client_a = self.exchange_clients.get(ex_a)
+            client_b = self.exchange_clients.get(ex_b)
+            
+            if not client_a or not client_b:
+                self.logger.error(f"Invalid exchanges for pre-load: {ex_a}, {ex_b}")
+                return
+
             # Resolve exchange-specific symbols
-            bingx_symbol = await self.resolver.resolve(self.bingx, symbol)
-            bybit_symbol = await self.resolver.resolve(self.bybit, symbol)
+            symbol_a = await self.resolver.resolve(client_a, symbol)
+            symbol_b = await self.resolver.resolve(client_b, symbol)
             
-            if not bingx_symbol or not bybit_symbol:
-                self.logger.warning(f"Could not resolve symbols for pre-loading {symbol}. BingX: {bingx_symbol}, Bybit: {bybit_symbol}")
+            if not symbol_a or not symbol_b:
+                self.logger.warning(f"Could not resolve symbols for pre-loading {symbol}. {ex_a}: {symbol_a}, {ex_b}: {symbol_b}")
                 # Fallback: start with empty deque
                 self.spread_history[symbol] = deque(maxlen=self.history_length)
                 self.last_history_update[symbol] = time.time()
                 return
 
             # Fetch 1-minute candles from both exchanges
-            bingx_candles = await self.bingx.fetch_ohlcv(
-                symbol=bingx_symbol,
+            candles_a = await client_a.fetch_ohlcv(
+                symbol=symbol_a,
                 timeframe='1m',
                 limit=60
             )
             
-            bybit_candles = await self.bybit.fetch_ohlcv(
-                symbol=bybit_symbol,
+            candles_b = await client_b.fetch_ohlcv(
+                symbol=symbol_b,
                 timeframe='1m',
                 limit=60
             )
@@ -145,28 +165,28 @@ class LiveMonitor:
                 return
             
             # Convert to DataFrames for easier processing
-            df_bingx = pd.DataFrame(
-                bingx_candles,
+            df_a = pd.DataFrame(
+                candles_a,
                 columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
             )
-            df_bybit = pd.DataFrame(
-                bybit_candles,
+            df_b = pd.DataFrame(
+                candles_b,
                 columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
             )
             
             # Align by timestamp (use inner join to ensure matching timestamps)
-            df_bingx['time'] = pd.to_datetime(df_bingx['timestamp'], unit='ms')
-            df_bybit['time'] = pd.to_datetime(df_bybit['timestamp'], unit='ms')
+            df_a['time'] = pd.to_datetime(df_a['timestamp'], unit='ms')
+            df_b['time'] = pd.to_datetime(df_b['timestamp'], unit='ms')
             
             df_merged = pd.merge(
-                df_bingx[['time', 'close']],
-                df_bybit[['time', 'close']],
+                df_a[['time', 'close']],
+                df_b[['time', 'close']],
                 on='time',
-                suffixes=('_bingx', '_bybit')
+                suffixes=('_a', '_b')
             )
             
-            # Calculate historical GROSS spreads: Close_BingX - Close_Bybit
-            df_merged['gross_spread'] = df_merged['close_bingx'] - df_merged['close_bybit']
+            # Calculate historical GROSS spreads: Close_A - Close_B
+            df_merged['gross_spread'] = df_merged['close_a'] - df_merged['close_b']
             
             # Populate spread_history with GROSS spreads (market data)
             historical_gross_spreads = df_merged['gross_spread'].tolist()
@@ -243,36 +263,47 @@ class LiveMonitor:
         Args:
             symbol: Trading pair symbol
         """
-        # Check if we have prices from both exchanges
-        bingx_price = self.price_cache['bingx'].get(symbol)
-        bybit_price = self.price_cache['bybit'].get(symbol)
+        # Get active pair for this symbol
+        pair = self.active_pairs.get(symbol)
+        if not pair:
+            return
+            
+        ex_a, ex_b = pair
         
-        if not bingx_price or not bybit_price:
+        # Check if we have prices from both exchanges
+        price_a = self.price_cache[ex_a].get(symbol)
+        price_b = self.price_cache[ex_b].get(symbol)
+        
+        if not price_a or not price_b:
             return
         
         # === STEP A: CALCULATE GROSS SPREAD ===
         
         # Calculate current executable spread (buy on one, sell on other)
         # Spread = ask_A - bid_B (cost to execute arbitrage)
-        spread_a_to_b = bingx_price['ask'] - bybit_price['bid']
-        spread_b_to_a = bybit_price['ask'] - bingx_price['bid']
+        spread_a_to_b = price_a['ask'] - price_b['bid']
+        spread_b_to_a = price_b['ask'] - price_a['bid']
         
         # Use the more favorable spread (gross spread)
         gross_spread = min(abs(spread_a_to_b), abs(spread_b_to_a))
         if spread_a_to_b < 0:
-            gross_spread = -gross_spread  # Negative spread means BingX cheaper
+            gross_spread = -gross_spread  # Negative spread means Exchange A cheaper
         
         # === STEP B: CALCULATE NET SPREAD (CRITICAL) ===
         
         # Calculate mid-price for fee calculation
-        mid_price = (bingx_price['last'] + bybit_price['last']) / 2.0
+        mid_price = (price_a['last'] + price_b['last']) / 2.0
+        
+        # Get fees for both exchanges
+        fee_a = self.fees[ex_a]['taker']
+        fee_b = self.fees[ex_b]['taker']
         
         # Calculate net spread after fees
         net_spread_val, net_spread_pct, fee_cost = calculate_net_spread(
             gross_spread=abs(gross_spread),
             price=mid_price,
-            taker_fee_a=self.fee_bingx_taker,
-            taker_fee_b=self.fee_bybit_taker
+            taker_fee_a=fee_a,
+            taker_fee_b=fee_b
         )
         
         # Preserve sign of spread
@@ -322,11 +353,12 @@ class LiveMonitor:
                 'gross_spread': gross_spread,
                 'gross_spread_pct': gross_spread_pct,
                 'fee_cost': fee_cost,
-                'fee_pct': (self.fee_bingx_taker + self.fee_bybit_taker) * 100,
+                'fee_pct': (fee_a + fee_b) * 100,
                 'net_spread': net_spread_val,
                 'net_spread_pct': net_spread_pct,
                 'z_score': z_score,
-                'mid_price': mid_price
+                'mid_price': mid_price,
+                'exchanges': pair
             })
             
             # Check for entry/exit signals (requires BOTH high Z-Score AND positive net spread)
@@ -398,34 +430,37 @@ class LiveMonitor:
                     f"🔔 EXIT SIGNAL: {symbol} | Z-Score={z_score:.2f}"
                 )
     
-    async def start(self, symbols: List[str]) -> None:
+    async def start(self, symbols: List[str], pair: tuple = ('bingx', 'bybit')) -> None:
         """
-        Start live monitoring for given symbols.
+        Start live monitoring for given symbols with specified exchange pair.
         Supports dynamic addition of symbols if already running.
-        
-        Pre-loads historical data before starting WebSocket monitoring.
         
         Args:
             symbols: List of trading pair symbols to monitor
+            pair: Tuple of exchange IDs (ex_a, ex_b)
         """
+        # Store active pair for these symbols
+        for symbol in symbols:
+            self.active_pairs[symbol] = pair
+
         # If already running, just add new symbols dynamically
         if self.running:
-            self.logger.info(f"LiveMonitor already running. Dynamically adding {len(symbols)} symbols: {symbols}")
+            self.logger.info(f"LiveMonitor already running. Dynamically adding {len(symbols)} symbols: {symbols} on {pair}")
             
             # Pre-load history for new symbols
             for symbol in symbols:
-                await self._preload_history(symbol)
+                await self._preload_history(symbol, ex_a=pair[0], ex_b=pair[1])
             
             # Subscribe dynamically
             await self.ws_manager.subscribe(symbols)
             return
 
         self.running = True
-        self.logger.info(f"Starting LiveMonitor for {len(symbols)} symbols")
+        self.logger.info(f"Starting LiveMonitor for {len(symbols)} symbols on {pair}")
         
         # Pre-load historical data for all symbols
         for symbol in symbols:
-            await self._preload_history(symbol)
+            await self._preload_history(symbol, ex_a=pair[0], ex_b=pair[1])
         
         # Start WebSocket manager
         await self.ws_manager.start(symbols)
@@ -453,14 +488,15 @@ class LiveMonitor:
             except asyncio.CancelledError:
                 pass
         
-        # Close CCXT exchanges
-        await self.bingx.close()
-        await self.bybit.close()
+        # Close all CCXT exchanges
+        for client in self.exchange_clients.values():
+            await client.close()
         
         # Clear buffers
         self.spread_history.clear()
-        self.price_cache = {'bingx': {}, 'bybit': {}}
+        self.price_cache = {ex: {} for ex in self.supported_exchanges}
         self.last_history_update.clear()
+        self.active_pairs.clear()
         
         self.logger.info("LiveMonitor stopped")
     
@@ -480,27 +516,33 @@ class LiveMonitor:
         if len(self.spread_history[symbol]) < 10:
             return None
         
+        # Get active pair
+        pair = self.active_pairs.get(symbol)
+        if not pair:
+            return None
+        ex_a, ex_b = pair
+
         # Get current prices
-        bingx_price = self.price_cache['bingx'].get(symbol)
-        bybit_price = self.price_cache['bybit'].get(symbol)
+        price_a = self.price_cache[ex_a].get(symbol)
+        price_b = self.price_cache[ex_b].get(symbol)
         
-        if not bingx_price or not bybit_price:
+        if not price_a or not price_b:
             return None
         
         # Calculate current spread
-        spread_a_to_b = bingx_price['ask'] - bybit_price['bid']
-        spread_b_to_a = bybit_price['ask'] - bingx_price['bid']
+        spread_a_to_b = price_a['ask'] - price_b['bid']
+        spread_b_to_a = price_b['ask'] - price_a['bid']
         gross_spread = min(abs(spread_a_to_b), abs(spread_b_to_a))
         if spread_a_to_b < 0:
             gross_spread = -gross_spread
         
         # Calculate mid-price and net spread
-        mid_price = (bingx_price['last'] + bybit_price['last']) / 2.0
+        mid_price = (price_a['last'] + price_b['last']) / 2.0
         net_spread_val, net_spread_pct, fee_cost = calculate_net_spread(
             gross_spread=abs(gross_spread),
             price=mid_price,
-            taker_fee_a=self.fee_bingx_taker,
-            taker_fee_b=self.fee_bybit_taker
+            taker_fee_a=self.fees[ex_a]['taker'],
+            taker_fee_b=self.fees[ex_b]['taker']
         )
         if gross_spread < 0:
             net_spread_val = -net_spread_val
@@ -526,7 +568,9 @@ class LiveMonitor:
             'in_position': self.in_position.get(symbol, False),
             'history_length': len(self.spread_history[symbol]),
             'baseline_mean': mean,
-            'baseline_std': std_dev
+            'baseline_std': std_dev,
+            'mid_price': mid_price,
+            'spread': gross_spread  # Alias for stats loop
         }
 
 
@@ -592,7 +636,7 @@ async def main():
                     
                     print(
                         f"{symbol:12} | "
-                        f"Spread: {stats['spread']:8.2f} | "
+                        f"Gross Spread: {stats['gross_spread']:8.2f} | "
                         f"Z-Score: {stats['z_score']:6.2f} | "
                         f"Baseline μ={stats['baseline_mean']:.2f} σ={stats['baseline_std']:.2f} | "
                         f"{position_indicator}"

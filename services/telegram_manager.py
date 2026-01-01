@@ -177,18 +177,25 @@ class TelegramSignalManager:
         # --- Parsing Strategy ---
         
         # 1. Check for Structured Headers
-        header_1 = self.header_gaib_regex.search(text)
-        header_2 = self.header_tek_regex.search(text)
+        # Use findall to find all candidates and pick the first one not in blacklist
+        gaib_matches = self.header_gaib_regex.findall(text)
+        tek_matches = self.header_tek_regex.findall(text)
         
         base_token = None
-        if header_1:
-            token_candidate = header_1.group(1).upper()
+        # Check Form 1
+        for token_candidate in gaib_matches:
+            token_candidate = token_candidate.upper()
             if token_candidate not in self.symbol_blacklist:
                 base_token = token_candidate
-        elif header_2:
-            token_candidate = header_2.group(1).upper()
-            if token_candidate not in self.symbol_blacklist:
-                base_token = token_candidate
+                break
+        
+        # Check Form 2 if Form 1 didn't find anything
+        if not base_token:
+            for token_candidate in tek_matches:
+                token_candidate = token_candidate.upper()
+                if token_candidate not in self.symbol_blacklist:
+                    base_token = token_candidate
+                    break
             
         if base_token:
             symbols_found.add(f"{base_token}/USDT")
@@ -255,7 +262,20 @@ class TelegramSignalManager:
             
             # Start asynchronous validation/monitoring flow
             if symbol not in self.active_signals or self.active_signals[symbol].done():
-                metadata = {'direction': direction, 'reported_spread': reported_spread}
+                # Determine exchange pair (default to bingx-bybit if not enough exchanges mentioned)
+                if len(exchanges_mentioned) >= 2:
+                    pair = (exchanges_mentioned[0], exchanges_mentioned[1])
+                elif len(exchanges_mentioned) == 1:
+                    # One exchange mentioned, use bybit as fallback second exchange
+                    pair = (exchanges_mentioned[0], 'bybit') if exchanges_mentioned[0] != 'bybit' else ('bingx', 'bybit')
+                else:
+                    pair = ('bingx', 'bybit')
+                
+                metadata = {
+                    'direction': direction, 
+                    'reported_spread': reported_spread,
+                    'pair': pair
+                }
                 task = asyncio.create_task(self._validate_and_confirm(symbol, message, metadata))
                 self.active_signals[symbol] = task
 
@@ -293,17 +313,14 @@ class TelegramSignalManager:
             self.logger.info(f"✅ {symbol} passed ADF test. Starting live monitoring...")
 
             # 2. Live Monitoring (Z-Score + Spread)
+            pair = metadata.get('pair', ('bingx', 'bybit'))
+            self.logger.info(f"🚀 Starting live monitoring for {symbol} on {pair}...")
+            
             # Add symbol to live monitor (ensure monitor is running)
             if not self.monitor.running:
-                await self.monitor.start([symbol])
+                await self.monitor.start([symbol], pair=pair)
             else:
-                # Add to existing monitor if possible (depends on LiveMonitor implementation)
-                # For now, let's assume we call start with the specific symbol
-                # and LiveMonitor handles multiple calls or we refactor it.
-                # Note: Existing LiveMonitor.start cancels old task. 
-                # Better to refactor LiveMonitor to support dynamic additions later if needed.
-                await self.monitor.start([symbol]) 
-
+                await self.monitor.start([symbol], pair=pair) 
             # 3. Wait loop for confirmation
             start_time = time.time()
             confirmed = False
