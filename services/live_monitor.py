@@ -153,11 +153,11 @@ class LiveMonitor:
             )
             
             # Ensure we have data from both exchanges
-            if not bingx_candles or not bybit_candles:
+            if not candles_a or not candles_b:
                 self.logger.warning(
                     f"Failed to fetch candles for {symbol}. "
-                    f"BingX: {len(bingx_candles) if bingx_candles else 0}, "
-                    f"Bybit: {len(bybit_candles) if bybit_candles else 0}"
+                    f"{ex_a}: {len(candles_a) if candles_a else 0}, "
+                    f"{ex_b}: {len(candles_b) if candles_b else 0}"
                 )
                 # Fallback: start with empty deque
                 self.spread_history[symbol] = deque(maxlen=self.history_length)

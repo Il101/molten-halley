@@ -70,9 +70,16 @@ class TelegramSignalManager:
             re.IGNORECASE
         )
         
-        # 3. Refined Spread Values
-        # Specifically targets "Курсовой: 3.12%"
-        self.course_spread_regex = re.compile(r'Курсовой:\s*(\d+[.,]\d+)\s*%', re.IGNORECASE)
+        # 3. Refined Spread Values (Various formats)
+        # Category A: Course/Target Spreads (High Priority)
+        self.spread_format_course_1 = re.compile(r'(?:КУРСОВОЙ|КУРС|КУРСО|КУР|ОТКЛОНЕНИЕ|ОТКЛОН):\s*(-?\d+[.,]\d+)\s*%', re.IGNORECASE)
+        self.spread_format_course_2 = re.compile(r'(-?\d+[.,]\d+)\s*%\s*(?:КУРСОВОЙ|КУРС|КУРСО|КУР|ОТКЛОНЕНИЕ|ОТКЛОН)', re.IGNORECASE)
+        self.spread_format_course_3 = re.compile(r'СПРЕД:\s*(-?\d+[.,]\d+)\s*%', re.IGNORECASE)
+        # Catch spread in the same line as the symbol: "RIVER: bitget-bybit 3.92%"
+        self.spread_format_course_header = re.compile(r'^[A-Z0-9]+:.*?\s*(-?\d+[.,]\d+)\s*%', re.IGNORECASE | re.MULTILINE)
+        
+        # Category B: Current/Live Spreads (Low Priority Fallback)
+        self.spread_format_current = re.compile(r'(?:ТЕКУЩИЙ|ТЕКУЩАЯ):\s*(-?\d+[.,]\d+)\s*%?', re.IGNORECASE)
         
         # Regular fallback for simple pairs (if needed)
         self.pair_regex = re.compile(r'\b([A-Z0-9]{2,10})/(USDT|USDC|BUSD)\b', re.IGNORECASE)
@@ -215,9 +222,30 @@ class TelegramSignalManager:
 
         # 2. Extract Specialized Metadata
         
-        # Spread from "Курсовой: X.XX%"
-        spread_match = self.course_spread_regex.search(text)
-        reported_spread = float(spread_match.group(1).replace(',', '.')) / 100 if spread_match else 0.0
+        # Extract reported spread using multiple formats
+        reported_spread = 0.0
+        
+        # Priority 1: Course/Target Spreads
+        spread_match = (
+            self.spread_format_course_1.search(text) or 
+            self.spread_format_course_2.search(text) or 
+            self.spread_format_course_3.search(text) or
+            self.spread_format_course_header.search(text)
+        )
+        
+        # Priority 2: Current/Live Spread (fallback only)
+        if not spread_match:
+            spread_match = self.spread_format_current.search(text)
+            if spread_match:
+                self.logger.debug("⚠️ Using Current Spread as fallback (no Course Spread found)")
+        
+        if spread_match:
+            try:
+                val_str = spread_match.group(1).replace(',', '.')
+                reported_spread = float(val_str) / 100
+                self.logger.debug(f"📊 Extracted spread: {reported_spread:.2%}")
+            except (ValueError, IndexError):
+                pass
         
         # Direction/Exchanges from 📗/📕 lines
         direction = None
