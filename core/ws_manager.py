@@ -39,7 +39,12 @@ class WebSocketManager:
         self.connections: Dict[str, aiohttp.ClientWebSocketResponse] = {}
         self.connection_status: Dict[str, bool] = {
             'bingx': False,
-            'bybit': False
+            'bybit': False,
+            'bitget': False,
+            'gateio': False,
+            'htx': False,
+            'phemex': False,
+            'mexc': False
         }
         
         # Data distribution
@@ -57,7 +62,12 @@ class WebSocketManager:
         # Subscription tracking (exchange-specific format)
         self.subscribed_symbols: Dict[str, List[str]] = {
             'bingx': [],
-            'bybit': []
+            'bybit': [],
+            'bitget': [],
+            'gateio': [],
+            'htx': [],
+            'phemex': [],
+            'mexc': []
         }
         
         # Active symbols tracking (normalized format: BTC/USDT)
@@ -184,7 +194,7 @@ class WebSocketManager:
                                 except Exception as e:
                                     self.logger.error(f"Error handling message from {exchange_name}: {e}")
                             
-                            # Handle BINARY messages (BingX GZIP compressed)
+                            # Handle BINARY messages (BingX and HTX use GZIP compression)
                             elif msg.type == WSMsgType.BINARY:
                                 try:
                                     # Decompress GZIP data
@@ -204,6 +214,14 @@ class WebSocketManager:
                                     # Try to parse as JSON
                                     try:
                                         data = json.loads(decompressed)
+                                        
+                                        # HTX sends ping in JSON format, respond with pong
+                                        if exchange_name == 'htx' and 'ping' in data:
+                                            pong_msg = {"pong": data["ping"]}
+                                            await ws.send_json(pong_msg)
+                                            self.logger.debug(f"Received HTX ping {data['ping']}, sent pong")
+                                            continue
+                                        
                                         await self._handle_message(exchange_name, data)
                                     except json.JSONDecodeError:
                                         # Not JSON, might be another heartbeat format
@@ -289,6 +307,82 @@ class WebSocketManager:
             self.logger.debug(f"Subscribed to {len(symbols)} symbols on Bybit")
             
             self.subscribed_symbols['bybit'] = symbols
+        
+        elif exchange_name == 'bitget':
+            # Bitget USDT-M Futures subscription format
+            args = []
+            for symbol in symbols:
+                # Convert BTC/USDT or BTC/USDT:USDT to BTCUSDT
+                bitget_symbol = symbol.replace('/', '').replace(':USDT', '')
+                args.append({
+                    "instType": "USDT-FUTURES",
+                    "channel": "ticker",
+                    "instId": bitget_symbol
+                })
+            subscribe_msg = {"op": "subscribe", "args": args}
+            await ws.send_json(subscribe_msg)
+            self.logger.debug(f"Subscribed to {len(symbols)} symbols on Bitget")
+            
+            self.subscribed_symbols['bitget'] = symbols
+        
+        elif exchange_name == 'gateio':
+            # Gate.io Futures subscription format
+            for symbol in symbols:
+                # Convert BTC/USDT to BTC_USDT
+                gateio_symbol = symbol.replace('/', '_').replace(':USDT', '')
+                subscribe_msg = {
+                    "time": int(time.time()),
+                    "channel": "futures.tickers",
+                    "event": "subscribe",
+                    "payload": [gateio_symbol]
+                }
+                await ws.send_json(subscribe_msg)
+            self.logger.debug(f"Subscribed to {len(symbols)} symbols on Gate.io")
+            
+            self.subscribed_symbols['gateio'] = symbols
+        
+        elif exchange_name == 'htx':
+            # HTX Linear Swap subscription format
+            for symbol in symbols:
+                # Convert BTC/USDT to BTC-USDT
+                htx_symbol = symbol.replace('/', '-').replace(':USDT', '')
+                subscribe_msg = {
+                    "sub": f"market.{htx_symbol}.detail",  # Use 'detail' not 'ticker'
+                    "id": f"detail_{htx_symbol}"
+                }
+                await ws.send_json(subscribe_msg)
+            self.logger.debug(f"Subscribed to {len(symbols)} symbols on HTX")
+            
+            self.subscribed_symbols['htx'] = symbols
+        
+        elif exchange_name == 'phemex':
+            # Phemex subscription format - use orderbook for bid/ask updates
+            for symbol in symbols:
+                # Convert BTC/USDT to BTCUSD (Phemex uses USD suffix for perpetuals)
+                phemex_symbol = symbol.replace('/', '').replace(':USDT', '').replace('USDT', 'USD')
+                subscribe_msg = {
+                    "id": 1,
+                    "method": "orderbook.subscribe",
+                    "params": [phemex_symbol]
+                }
+                await ws.send_json(subscribe_msg)
+            self.logger.debug(f"Subscribed to {len(symbols)} symbols on Phemex")
+            
+            self.subscribed_symbols['phemex'] = symbols
+        
+        elif exchange_name == 'mexc':
+            # MEXC Futures subscription format
+            for symbol in symbols:
+                # Convert BTC/USDT to BTC_USDT
+                mexc_symbol = symbol.replace('/', '_').replace(':USDT', '')
+                subscribe_msg = {
+                    "method": "sub.ticker",
+                    "param": {"symbol": mexc_symbol}
+                }
+                await ws.send_json(subscribe_msg)
+            self.logger.debug(f"Subscribed to {len(symbols)} symbols on MEXC")
+            
+            self.subscribed_symbols['mexc'] = symbols
     
     async def _handle_message(self, exchange_name: str, message: dict) -> None:
         """
@@ -375,6 +469,162 @@ class WebSocketManager:
                         'local_timestamp': time.time()
                     }
             
+            elif exchange_name == 'bitget':
+                # Bitget message format for USDT-M Futures
+                if 'data' in message and message.get('action') in ['snapshot', 'update']:
+                    data_list = message.get('data', [])
+                    if data_list:
+                        data = data_list[0]
+                        symbol_raw = data.get('instId', '')
+                        
+                        # Convert BTCUSDT to BTC/USDT
+                        if symbol_raw.endswith('USDT'):
+                            base = symbol_raw[:-4]
+                            symbol = f"{base}/USDT"
+                        else:
+                            symbol = symbol_raw
+                        
+                        bid = float(data.get('bidPr', 0) or data.get('bestBid', 0))
+                        ask = float(data.get('askPr', 0) or data.get('bestAsk', 0))
+                        last = float(data.get('lastPr', 0) or data.get('last', 0))
+                        
+                        normalized_data = {
+                            'exchange': 'bitget',
+                            'symbol': symbol,
+                            'bid': bid,
+                            'ask': ask,
+                            'last': last,
+                            'timestamp': int(data.get('ts', 0)),
+                            'local_timestamp': time.time()
+                        }
+            
+            elif exchange_name == 'gateio':
+                # Gate.io Futures message format
+                if message.get('event') == 'update' and message.get('channel') == 'futures.tickers':
+                    result = message.get('result', [])
+                    if result:
+                        data = result[0] if isinstance(result, list) else result
+                        symbol_raw = data.get('contract', '')
+                        
+                        # Convert BTC_USDT to BTC/USDT
+                        symbol = symbol_raw.replace('_', '/')
+                        
+                        bid = float(data.get('highest_bid', 0) or 0)
+                        ask = float(data.get('lowest_ask', 0) or 0)
+                        last = float(data.get('last', 0) or 0)
+                        
+                        # Fallback to last if bid/ask missing
+                        if bid == 0:
+                            bid = last
+                        if ask == 0:
+                            ask = last
+                        
+                        normalized_data = {
+                            'exchange': 'gateio',
+                            'symbol': symbol,
+                            'bid': bid,
+                            'ask': ask,
+                            'last': last,
+                            'timestamp': int(message.get('time', 0) * 1000),
+                            'local_timestamp': time.time()
+                        }
+            
+            elif exchange_name == 'htx':
+                # HTX Linear Swap message format
+                # HTX sends ping messages that need pong response
+                if 'ping' in message:
+                    # Respond to ping (handled in connect_exchange)
+                    pass
+                elif 'tick' in message:
+                    data = message.get('tick', {})
+                    ch = message.get('ch', '')
+                    
+                    # Parse symbol from channel: market.BTC-USDT.detail
+                    parts = ch.split('.')
+                    if len(parts) >= 2:
+                        symbol_raw = parts[1]
+                        symbol = symbol_raw.replace('-', '/')
+                        
+                        # HTX returns bid/ask as [price, size] arrays
+                        bid_arr = data.get('bid', [0])
+                        ask_arr = data.get('ask', [0])
+                        bid = float(bid_arr[0]) if isinstance(bid_arr, list) else float(bid_arr)
+                        ask = float(ask_arr[0]) if isinstance(ask_arr, list) else float(ask_arr)
+                        last = float(data.get('close', 0))
+                        
+                        normalized_data = {
+                            'exchange': 'htx',
+                            'symbol': symbol,
+                            'bid': bid,
+                            'ask': ask,
+                            'last': last,
+                            'timestamp': int(message.get('ts', 0)),
+                            'local_timestamp': time.time()
+                        }
+            
+            elif exchange_name == 'phemex':
+                # Phemex orderbook message format
+                if 'book' in message:
+                    book = message.get('book', {})
+                    symbol_raw = message.get('symbol', '')
+                    
+                    # Convert BTCUSD to BTC/USDT
+                    if symbol_raw.endswith('USD'):
+                        base = symbol_raw[:-3]
+                        symbol = f"{base}/USDT"
+                    else:
+                        symbol = symbol_raw
+                    
+                    # Phemex orderbook uses scaled prices (divide by 10000)
+                    # Format: [[price, size], ...]
+                    bids = book.get('bids', [])
+                    asks = book.get('asks', [])
+                    
+                    if bids and asks:
+                        # First element is best bid/ask, format: [price_scaled, size]
+                        bid = float(bids[0][0]) / 10000  # Scale down
+                        ask = float(asks[0][0]) / 10000  # Scale down
+                        last = (bid + ask) / 2  # Approximate last as mid price
+                        
+                        normalized_data = {
+                            'exchange': 'phemex',
+                            'symbol': symbol,
+                            'bid': bid,
+                            'ask': ask,
+                            'last': last,
+                            'timestamp': int(message.get('timestamp', 0)),
+                            'local_timestamp': time.time()
+                        }
+            
+            elif exchange_name == 'mexc':
+                # MEXC Futures message format
+                if message.get('channel') == 'push.ticker':
+                    data = message.get('data', {})
+                    symbol_raw = message.get('symbol', '')
+                    
+                    # Convert BTC_USDT to BTC/USDT
+                    symbol = symbol_raw.replace('_', '/')
+                    
+                    bid = float(data.get('bid1', 0) or data.get('bestBidPrice', 0))
+                    ask = float(data.get('ask1', 0) or data.get('bestAskPrice', 0))
+                    last = float(data.get('lastPrice', 0) or data.get('last', 0))
+                    
+                    # Fallback if bid/ask missing
+                    if bid == 0:
+                        bid = last
+                    if ask == 0:
+                        ask = last
+                    
+                    normalized_data = {
+                        'exchange': 'mexc',
+                        'symbol': symbol,
+                        'bid': bid,
+                        'ask': ask,
+                        'last': last,
+                        'timestamp': int(data.get('timestamp', 0)),
+                        'local_timestamp': time.time()
+                    }
+            
             # Store and distribute normalized data
             if normalized_data and normalized_data['bid'] > 0 and normalized_data['ask'] > 0:
                 # Update cache
@@ -421,6 +671,38 @@ class WebSocketManager:
                     # Bybit ping format: JSON
                     await ws.send_json({"op": "ping"})
                     self.logger.debug(f"Sent ping (JSON) to {exchange_name}")
+                
+                elif exchange_name == 'bitget':
+                    # Bitget ping format: raw string "ping"
+                    await ws.send_str("ping")
+                    self.logger.debug(f"Sent ping to {exchange_name}")
+                
+                elif exchange_name == 'gateio':
+                    # Gate.io ping format: JSON
+                    await ws.send_json({
+                        "time": int(time.time()),
+                        "channel": "futures.ping"
+                    })
+                    self.logger.debug(f"Sent ping to {exchange_name}")
+                
+                elif exchange_name == 'htx':
+                    # HTX: Server sends ping, we just need to respond with pong
+                    # Pong is handled in message processing loop
+                    pass
+                
+                elif exchange_name == 'phemex':
+                    # Phemex ping format: JSON
+                    await ws.send_json({
+                        "id": 0,
+                        "method": "server.ping",
+                        "params": []
+                    })
+                    self.logger.debug(f"Sent ping to {exchange_name}")
+                
+                elif exchange_name == 'mexc':
+                    # MEXC ping format: JSON
+                    await ws.send_json({"method": "ping"})
+                    self.logger.debug(f"Sent ping to {exchange_name}")
         
         except asyncio.CancelledError:
             self.logger.debug(f"Heartbeat cancelled for {exchange_name}")
@@ -550,7 +832,8 @@ class WebSocketManager:
         
         # Start connection tasks for each exchange
         # Note: connect_exchange will auto-subscribe to active_symbols on connection
-        for exchange_name in ['bingx', 'bybit']:
+        all_exchanges = ['bingx', 'bybit', 'bitget', 'gateio', 'htx', 'phemex', 'mexc']
+        for exchange_name in all_exchanges:
             if self.config['websocket'].get(exchange_name, {}).get('enabled', True):
                 task = asyncio.create_task(
                     self.connect_exchange(exchange_name)

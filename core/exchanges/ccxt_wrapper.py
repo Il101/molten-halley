@@ -57,6 +57,52 @@ class RealExchange(BaseExchange):
                     'testnet': testnet
                 }
             })
+        elif exchange_name == 'bitget':
+            self.client = ccxt.bitget({
+                'apiKey': api_key,
+                'secret': api_secret,
+                'password': '',  # Passphrase - loaded from config if provided
+                'options': {
+                    'defaultType': 'swap',  # Perpetual futures
+                    'testnet': testnet
+                }
+            })
+        elif exchange_name == 'gateio':
+            self.client = ccxt.gateio({
+                'apiKey': api_key,
+                'secret': api_secret,
+                'options': {
+                    'defaultType': 'swap',  # USDT-settled futures
+                    'testnet': testnet
+                }
+            })
+        elif exchange_name == 'htx':
+            self.client = ccxt.htx({
+                'apiKey': api_key,
+                'secret': api_secret,
+                'options': {
+                    'defaultType': 'swap',  # Linear swap
+                    'testnet': testnet
+                }
+            })
+        elif exchange_name == 'phemex':
+            self.client = ccxt.phemex({
+                'apiKey': api_key,
+                'secret': api_secret,
+                'options': {
+                    'defaultType': 'swap',  # Perpetual contracts
+                    'testnet': testnet
+                }
+            })
+        elif exchange_name == 'mexc':
+            self.client = ccxt.mexc({
+                'apiKey': api_key,
+                'secret': api_secret,
+                'options': {
+                    'defaultType': 'swap',  # USDT-M Futures
+                    'testnet': testnet
+                }
+            })
         else:
             raise ValueError(f"Unsupported exchange: {exchange_name}")
         

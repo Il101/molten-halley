@@ -9,6 +9,21 @@ fees:
   bybit:
     taker: 0.00055 # 0.055%
     maker: 0.0002  # 0.02%
+  bitget:
+    taker: 0.0006  # 0.06%
+    maker: 0.0002  # 0.02%
+  gateio:
+    taker: 0.0005  # 0.05%
+    maker: 0.00015 # 0.015%
+  htx:
+    taker: 0.0005  # 0.05%
+    maker: 0.0002  # 0.02%
+  phemex:
+    taker: 0.0006  # 0.06%
+    maker: 0.0001  # 0.01%
+  mexc:
+    taker: 0.0006  # 0.06%
+    maker: 0.0002  # 0.02%
 
 # Trading parameters
 trading:
@@ -67,6 +82,42 @@ exchanges:
     testnet: false
     api_key: ''
     api_secret: ''
+  
+  bitget:
+    enabled: true
+    default_type: 'swap'        # USDT-M Futures
+    testnet: false
+    api_key: ''
+    api_secret: ''
+    password: ''                # Bitget requires passphrase
+  
+  gateio:
+    enabled: true
+    default_type: 'swap'        # USDT-settled Futures
+    testnet: false
+    api_key: ''
+    api_secret: ''
+  
+  htx:
+    enabled: true
+    default_type: 'swap'        # Linear Swap
+    testnet: false
+    api_key: ''
+    api_secret: ''
+  
+  phemex:
+    enabled: true
+    default_type: 'swap'        # Perpetual Contracts
+    testnet: false
+    api_key: ''
+    api_secret: ''
+  
+  mexc:
+    enabled: true
+    default_type: 'swap'        # USDT-M Futures
+    testnet: false
+    api_key: ''
+    api_secret: ''
 
 # WebSocket configuration
 websocket:
@@ -121,6 +172,26 @@ websocket:
   
   bybit:
     url: 'wss://stream.bybit.com/v5/public/linear'
+    enabled: true
+  
+  bitget:
+    url: 'wss://ws.bitget.com/v2/ws/public'
+    enabled: true
+  
+  gateio:
+    url: 'wss://fx-ws.gateio.ws/v4/ws/usdt'
+    enabled: true
+  
+  htx:
+    url: 'wss://api.hbdm.com/linear-swap-ws'
+    enabled: true
+  
+  phemex:
+    url: 'wss://ws.phemex.com'
+    enabled: true
+  
+  mexc:
+    url: 'wss://contract.mexc.com/edge'
     enabled: true
   
   reconnect_delay: 5            # Seconds

@@ -83,7 +83,32 @@ class TelegramSignalManager:
             'CHART', 'FOLLOW', 'GRAPH', 'ГРАФИК', 'ГРАФ', 'СЛЕДИТЬ'
         }
         
-        self.logger.info("TelegramSignalManager initialized with NARROW structured parsing")
+        # Exchange name mapping: signal name -> internal exchange ID
+        # Maps variations of exchange names in signals to our internal identifiers
+        self.exchange_name_map = {
+            # BingX
+            'bingx': 'bingx',
+            # Bybit
+            'bybit': 'bybit',
+            # Bitget
+            'bitget': 'bitget',
+            # Gate.io (various formats)
+            'gate.io': 'gateio',
+            'gateio': 'gateio',
+            'gate': 'gateio',
+            # Huobi / HTX
+            'huobi': 'htx',
+            'htx': 'htx',
+            # Phemex
+            'phemex': 'phemex',
+            # MEXC
+            'mexc': 'mexc',
+        }
+        
+        # All supported exchanges for strict matching
+        self.supported_exchanges = set(self.exchange_name_map.values())
+        
+        self.logger.info(f"TelegramSignalManager initialized with {len(self.supported_exchanges)} supported exchanges")
 
     async def start(self):
         """Start the Telegram client and listeners."""
@@ -189,20 +214,28 @@ class TelegramSignalManager:
         
         # Direction/Exchanges from 📗/📕 lines
         direction = None
-        supported_mentioned = []
+        exchanges_mentioned = []
         book_matches = self.book_line_regex.findall(text)
         
-        # We look for BingX/Bybit direction
-        for emoji, ex_name, dir_str in book_matches:
-            ex_name = ex_name.lower()
-            if ex_name in ['bingx', 'bybit']:
+        # Extract exchanges from book lines using strict mapping
+        for emoji, ex_name_raw, dir_str in book_matches:
+            ex_name = ex_name_raw.strip().lower()
+            
+            # Use strict exchange name mapping
+            if ex_name in self.exchange_name_map:
+                internal_name = self.exchange_name_map[ex_name]
+                exchanges_mentioned.append(internal_name)
                 direction = dir_str.upper()
-                supported_mentioned.append(ex_name)
+                self.logger.debug(f"📊 Exchange matched: '{ex_name}' -> '{internal_name}', direction: {direction}")
         
         # If no book lines found, fall back to simple detection if needed
         if not book_matches:
             # Legacy/Fallback detection could go here (Direction regex)
             pass
+        
+        # Log detected exchanges
+        if exchanges_mentioned:
+            self.logger.info(f"🏛️ Exchanges in signal: {exchanges_mentioned}")
 
         for symbol in symbols_found:
             # Check for manual mapping in config first
