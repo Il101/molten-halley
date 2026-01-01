@@ -79,7 +79,8 @@ class LiveMonitor:
         self.last_history_update: Dict[str, float] = {}
         self.history_update_interval = 60  # Update once per minute (seconds)
         
-        # Price cache for pairing
+        # Price cache for pairing (currently only BingX vs Bybit is supported)
+        self.supported_exchanges = {'bingx', 'bybit'}
         self.price_cache: Dict[str, Dict[str, dict]] = {
             'bingx': {},
             'bybit': {}
@@ -207,6 +208,11 @@ class LiveMonitor:
                 # Update price cache
                 exchange = data['exchange']
                 symbol = data['symbol']
+                
+                # Only process supported exchanges (BingX vs Bybit arbitrage)
+                if exchange not in self.supported_exchanges:
+                    continue
+                
                 self.price_cache[exchange][symbol] = data
                 
                 # Emit price update event
