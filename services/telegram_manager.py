@@ -274,14 +274,19 @@ class TelegramSignalManager:
             # 3. Wait loop for confirmation
             start_time = time.time()
             confirmed = False
+            last_stats = None
+            
+            # Optional: Send initial status message
+            status_msg = await original_msg.reply(f"🔍 ADF Test Passed. Monitoring for target Z-Score...\n(Timeout: {self.signal_timeout}s)")
             
             while time.time() - start_time < self.signal_timeout:
                 stats = self.monitor.get_current_stats(symbol)
                 if stats:
+                    last_stats = stats
                     z_score = stats.get('z_score', 0)
-                    net_spread_pct = stats.get('net_spread', 0) # Assuming this is pct or we compare value
+                    net_spread_pct = stats.get('net_spread', 0)
                     
-                    # Check conditions (Market Anomaly + Profitability)
+                    # Check conditions
                     z_threshold = self.tg_config.get('z_score_entry', 2.5)
                     z_cond = abs(z_score) > z_threshold
                     spread_cond = net_spread_pct > 0
@@ -294,31 +299,32 @@ class TelegramSignalManager:
                     # Direction Match Check
                     dir_cond = True
                     if self.tg_config.get('require_direction_match', False) and metadata['direction']:
-                        # z_score > 0 means BingX is expensive, so we'd SELL BingX, BUY Bybit
-                        # If signal says LONG Huobi (Buy), then Huobi is cheap.
-                        # So if signal says LONG, it means FIRST exchange is cheap.
-                        # We don't know which exchange is 'first' in the signal message usually, 
-                        # but we can check if our arbitrage direction makes sense.
-                        # but we can check if our arbitrage direction makes sense.
-                        # For now, let's just log it or implement a basic check if needed.
+                        # Logic to verify if Z-score direction matches signal recommendation
                         pass
-                    
-                    if not z_cond:
-                         self.logger.debug(f"⏳ {symbol} Z-Score {z_score:.2f} too low (Need > {z_threshold})")
-                    if not spread_cond:
-                         self.logger.debug(f"⏳ {symbol} Net Spread {net_spread_pct:.2f}% too low (Need > 0%)")
                     
                     if z_cond and spread_cond and dir_cond:
                         confirmed = True
                         break
                 
-                await asyncio.sleep(5) # Check every 5 seconds
+                await asyncio.sleep(5)
             
-            if confirmed:
+            if confirmed and last_stats:
+                z_score = last_stats.get('z_score', 0)
+                net_spread = last_stats.get('net_spread', 0)
                 self.logger.info(f"🚀 Signal CONFIRMED for {symbol}! Replying to Telegram...")
-                await original_msg.reply("✅")
+                
+                # Update status message or send new one
+                conf_text = f"✅ **Confirmed!**\nZ-Score: `{z_score:.2f}`\nNet Spread: `{net_spread:.2f}%`"
+                try:
+                    await status_msg.edit(conf_text)
+                except:
+                    await original_msg.reply(conf_text)
             else:
                 self.logger.info(f"⏳ Signal for {symbol} timed out without confirmation.")
+                try:
+                    await status_msg.edit(f"⏳ Monitoring timed out for {symbol}.\nLast Z-Score: `{last_stats['z_score']:.2f}`" if last_stats else "⏳ Monitoring timed out.")
+                except:
+                    pass
 
         except Exception as e:
             self.logger.error(f"Error in signal confirmation flow for {symbol}: {e}", exc_info=True)
