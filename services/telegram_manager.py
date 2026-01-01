@@ -20,6 +20,9 @@ from services.live_monitor import LiveMonitor
 from core.event_bus import EventBus
 from utils.logger import get_logger
 from utils.symbol_resolver import SymbolResolver
+from utils.config import get_config
+
+from telethon.sessions import StringSession
 
 class TelegramSignalManager:
     """
@@ -29,22 +32,21 @@ class TelegramSignalManager:
     def __init__(self, config_path: str = 'config/config.yaml'):
         self.logger = get_logger(__name__)
         self.config_path = config_path
+        
+        # Load config
+        full_config = get_config(config_path)
+        self.tg_config = full_config.get('telegram', {})
+        
         self.validator = HistoricalValidator(config_path)
         self.monitor = LiveMonitor(config_path)
         self.event_bus = EventBus.instance()
-        
-        # Load config
-        import yaml
-        with open(config_path, 'r') as f:
-            full_config = yaml.safe_load(f)
-            self.tg_config = full_config.get('telegram', {})
-            
         self.resolver = SymbolResolver(full_config)
         
         self.enabled = self.tg_config.get('enabled', False)
         self.api_id = self.tg_config.get('api_id')
         self.api_hash = self.tg_config.get('api_hash')
         self.session_name = self.tg_config.get('session_name', 'arbibot_session')
+        self.session_string = self.tg_config.get('session_string')
         self.channels = self.tg_config.get('channels', [])
         self.signal_timeout = self.tg_config.get('signal_timeout', 1800)
         
@@ -90,11 +92,15 @@ class TelegramSignalManager:
             return
 
         if not self.api_id or not self.api_hash:
-            self.logger.error("Telegram API credentials missing. Please check config/config.yaml")
+            self.logger.error("Telegram API credentials missing. Please check config/config.yaml or environment variables")
             return
 
-        self.logger.info(f"Connecting to Telegram (Session: {self.session_name})...")
-        self.client = TelegramClient(self.session_name, self.api_id, self.api_hash)
+        if self.session_string:
+            self.logger.info("Connecting to Telegram using StringSession...")
+            self.client = TelegramClient(StringSession(self.session_string), self.api_id, self.api_hash)
+        else:
+            self.logger.info(f"Connecting to Telegram (Session File: {self.session_name})...")
+            self.client = TelegramClient(self.session_name, self.api_id, self.api_hash)
         
         @self.client.on(events.NewMessage(chats=self.channels))
         async def handle_new_message(event: events.NewMessage.Event):

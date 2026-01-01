@@ -16,25 +16,13 @@ import sys
 
 import aiohttp
 from aiohttp import WSMsgType
-import yaml
-
-# Add parent directory to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
-
 from utils.logger import get_logger
 from core.event_bus import EventBus
-
+from utils.config import get_config
 
 class WebSocketManager:
     """
     Manages WebSocket connections to cryptocurrency exchanges.
-    
-    Features:
-    - Multi-exchange support (BingX, Bybit)
-    - Auto-reconnection with exponential backoff
-    - Message normalization across exchanges
-    - Heartbeat/ping-pong monitoring
-    - Async queue-based data distribution
     """
     
     def __init__(self, config_path: str = 'config/config.yaml'):
@@ -45,7 +33,7 @@ class WebSocketManager:
             config_path: Path to configuration YAML file
         """
         self.logger = get_logger(__name__)
-        self.config = self._load_config(config_path)
+        self.config = get_config(config_path)
         
         # Connection state
         self.connections: Dict[str, aiohttp.ClientWebSocketResponse] = {}
