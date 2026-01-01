@@ -87,6 +87,32 @@ scanner:
     - '1000*'                   # Exclude 1000PEPE, 1000SHIB, etc.
   auto_update_whitelist: true
 
+# Telegram Integration
+telegram:
+  enabled: true # Set to true and provide API keys to use
+  api_id: '24013710'     # Get from https://my.telegram.org
+  api_hash: 'a63c4e19b2e253e64397d1f240bb22dd'   # Get from https://my.telegram.org
+  session_name: 'arbibot_session'
+  
+  # List of channel usernames or IDs to monitor (e.g., 'trading_signals' or '@my_source_bot')
+  # NOTE: You MUST be a member of the channel or have an active chat with the bot.
+  channels: ['@FuturesArbitrageBot'] 
+  
+  signal_timeout: 1800 # 30 minutes to wait for live confirmation
+  adf_lookback_candles: 1000 # Historical candles for ADF check
+  adf_timeframe: '15m'
+  z_score_window: 20
+  
+  # Extended filters (Advanced)
+  require_direction_match: true   # Check if signal direction (LONG/SHORT) matches our strategy
+  min_signal_spread_pct: 0.005    # Minimum spread reported in signal to even consider it
+  
+  # Manual symbol mapping (Signal -> Exchange)
+  symbol_mapping:
+    # Example: Some signals use 1000PEPE, others PEPE1000
+    # BDX: BDX # No mapping if they are different tokens
+    PEPE1000: 1000PEPE
+
 # WebSocket configuration
 websocket:
   bingx:

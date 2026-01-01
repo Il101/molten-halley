@@ -29,6 +29,7 @@ from core.ws_manager import WebSocketManager
 from core.event_bus import EventBus
 from utils.metrics import calculate_z_score, calculate_net_spread
 from utils.logger import get_logger
+from utils.symbol_resolver import SymbolResolver
 
 
 class LiveMonitor:
@@ -52,6 +53,7 @@ class LiveMonitor:
         self.ws_manager = WebSocketManager(config_path)
         self.event_bus = EventBus.instance()
         self.config = self.ws_manager.config
+        self.resolver = SymbolResolver(self.config)
         
         # Load fee configuration
         self.fee_bingx_taker = self.config['fees']['bingx']['taker']
@@ -105,16 +107,26 @@ class LiveMonitor:
         try:
             self.logger.info(f"Pre-loading 60 minutes of history for {symbol}...")
             
+            # Resolve exchange-specific symbols
+            bingx_symbol = await self.resolver.resolve(self.bingx, symbol)
+            bybit_symbol = await self.resolver.resolve(self.bybit, symbol)
+            
+            if not bingx_symbol or not bybit_symbol:
+                self.logger.warning(f"Could not resolve symbols for pre-loading {symbol}. BingX: {bingx_symbol}, Bybit: {bybit_symbol}")
+                # Fallback: start with empty deque
+                self.spread_history[symbol] = deque(maxlen=self.history_length)
+                self.last_history_update[symbol] = time.time()
+                return
+
             # Fetch 1-minute candles from both exchanges
-            # Format: [[timestamp, open, high, low, close, volume], ...]
             bingx_candles = await self.bingx.fetch_ohlcv(
-                symbol=symbol,
+                symbol=bingx_symbol,
                 timeframe='1m',
                 limit=60
             )
             
             bybit_candles = await self.bybit.fetch_ohlcv(
-                symbol=symbol,
+                symbol=bybit_symbol,
                 timeframe='1m',
                 limit=60
             )
@@ -383,12 +395,25 @@ class LiveMonitor:
     async def start(self, symbols: List[str]) -> None:
         """
         Start live monitoring for given symbols.
+        Supports dynamic addition of symbols if already running.
         
         Pre-loads historical data before starting WebSocket monitoring.
         
         Args:
             symbols: List of trading pair symbols to monitor
         """
+        # If already running, just add new symbols dynamically
+        if self.running:
+            self.logger.info(f"LiveMonitor already running. Dynamically adding {len(symbols)} symbols: {symbols}")
+            
+            # Pre-load history for new symbols
+            for symbol in symbols:
+                await self._preload_history(symbol)
+            
+            # Subscribe dynamically
+            await self.ws_manager.subscribe(symbols)
+            return
+
         self.running = True
         self.logger.info(f"Starting LiveMonitor for {len(symbols)} symbols")
         

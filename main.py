@@ -28,7 +28,7 @@ def main():
     
     parser.add_argument(
         'mode',
-        choices=['gui', 'scan', 'analyze', 'live'],
+        choices=['gui', 'scan', 'analyze', 'live', 'telegram'],
         help='Operation mode'
     )
     
@@ -70,6 +70,8 @@ def main():
             run_analysis(args)
         elif args.mode == 'live':
             run_live_monitor(args)
+        elif args.mode == 'telegram':
+            run_telegram_manager(args)
     except KeyboardInterrupt:
         logger.info("\nShutdown requested by user")
     except Exception as e:
@@ -168,13 +170,26 @@ def run_analysis(args):
         sys.exit(1)
 
 
-def run_live_monitor(args):
+def run_telegram_manager(args):
     """
-    Run live WebSocket monitoring (headless)
+    Run Telegram Signal Manager to listen for signals
     """
-    logger.info("Starting live monitor...")
-    logger.warning("Live monitor not yet implemented")
-    logger.info("Coming soon: WebSocket real-time monitoring")
+    logger.info("Starting Telegram Signal Manager...")
+    try:
+        import asyncio
+        from services.telegram_manager import TelegramSignalManager
+        
+        manager = TelegramSignalManager(config_path=args.config)
+        
+        # Run async manager
+        try:
+            asyncio.run(manager.start())
+        except KeyboardInterrupt:
+            asyncio.run(manager.stop())
+            
+    except Exception as e:
+        logger.error(f"Telegram manager error: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == '__main__':

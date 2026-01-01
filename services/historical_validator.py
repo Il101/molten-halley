@@ -23,6 +23,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from utils.metrics import calculate_z_score, adf_test, calculate_spread, calculate_spread_stats
 from utils.logger import get_logger
+from utils.symbol_resolver import SymbolResolver
 
 
 class HistoricalValidator:
@@ -45,6 +46,7 @@ class HistoricalValidator:
         self.logger = get_logger(__name__)
         self.config = self._load_config(config_path)
         self.exchanges = self._setup_exchanges()
+        self.resolver = SymbolResolver(self.config)
         
         self.logger.info("HistoricalValidator initialized successfully")
     
@@ -124,13 +126,18 @@ class HistoricalValidator:
                 })
                 self.logger.debug("Bybit exchange initialized")
             
+            # Pre-load markets for all exchanges
+            for name, ex in exchanges.items():
+                self.logger.info(f"🔄 Pre-loading markets for {name}...")
+                ex.load_markets()
+                
             return exchanges
             
         except Exception as e:
             self.logger.error(f"Error setting up exchanges: {e}")
             raise
     
-    def fetch_ohlcv(
+    async def fetch_ohlcv(
         self,
         exchange: ccxt.Exchange,
         symbol: str,
@@ -139,18 +146,16 @@ class HistoricalValidator:
     ) -> Optional[pd.DataFrame]:
         """
         Fetch historical OHLCV data from exchange with pagination support.
-        
-        Args:
-            exchange: CCXT exchange instance
-            symbol: Trading pair symbol (e.g., 'BTC/USDT')
-            timeframe: Candle timeframe (e.g., '15m', '1h')
-            limit: Number of candles to fetch
-            
-        Returns:
-            DataFrame with timestamp and close price, or None on error
         """
-        exchange_name = exchange.id
-        self.logger.info(f"Fetching {limit} candles of {symbol} from {exchange_name}")
+        ex_id = exchange.id
+        
+        # Resolve exchange-specific symbol
+        resolved_symbol = await self.resolver.resolve(exchange, symbol)
+        if not resolved_symbol:
+            self.logger.error(f"❌ Could not resolve {symbol} for {ex_id}")
+            return None
+            
+        self.logger.info(f"Fetching {limit} candles of {resolved_symbol} from {ex_id}")
         
         try:
             all_ohlcv = []
@@ -158,58 +163,46 @@ class HistoricalValidator:
             now = exchange.milliseconds()
             since = now - (limit * duration_ms)
             
-            self.logger.debug(f"Starting from {datetime.fromtimestamp(since/1000)}")
-            
             # Pagination loop
             while len(all_ohlcv) < limit:
-                fetch_limit = min(limit - len(all_ohlcv), 1000)  # Max 1000 per request
-                
+                fetch_limit = min(limit - len(all_ohlcv), 1000)
                 try:
                     ohlcv = exchange.fetch_ohlcv(
-                        symbol,
+                        resolved_symbol,
                         timeframe,
                         since=since,
                         limit=fetch_limit
                     )
-                    
                     if not ohlcv:
-                        self.logger.debug("No more data available")
                         break
                     
                     all_ohlcv.extend(ohlcv)
-                    
-                    # Update 'since' for next batch
-                    last_timestamp = ohlcv[-1][0]
-                    since = last_timestamp + duration_ms
-                    
-                    # Stop if we reached current time
+                    since = ohlcv[-1][0] + duration_ms
                     if since > now:
                         break
-                    
-                    self.logger.debug(f"Fetched {len(all_ohlcv)}/{limit} candles")
-                    
                 except Exception as e:
-                    self.logger.error(f"Error fetching chunk: {e}")
+                    self.logger.error(f"Error fetching chunk from {ex_id}: {e}")
                     break
             
+            if not all_ohlcv:
+                return None
+
             # Convert to DataFrame
             df = pd.DataFrame(
                 all_ohlcv,
                 columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
             )
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            
-            # Remove duplicates
             df = df.drop_duplicates(subset='timestamp')
             
-            self.logger.info(f"Successfully fetched {len(df)} candles from {exchange_name}")
+            self.logger.info(f"Successfully fetched {len(df)} candles from {ex_id}")
             return df[['timestamp', 'close']]
             
         except Exception as e:
-            self.logger.error(f"Error fetching data from {exchange_name}: {e}")
+            self.logger.error(f"Critical error in fetch_ohlcv for {ex_id}: {e}")
             return None
     
-    def analyze(
+    async def analyze(
         self,
         symbol: str,
         timeframe: Optional[str] = None,
@@ -243,8 +236,8 @@ class HistoricalValidator:
         self.logger.info(f"Analyzing {symbol} with {timeframe} timeframe, {limit} candles")
         
         # Fetch data from both exchanges
-        bingx_df = self.fetch_ohlcv(self.exchanges['bingx'], symbol, timeframe, limit)
-        bybit_df = self.fetch_ohlcv(self.exchanges['bybit'], symbol, timeframe, limit)
+        bingx_df = await self.fetch_ohlcv(self.exchanges['bingx'], symbol, timeframe, limit)
+        bybit_df = await self.fetch_ohlcv(self.exchanges['bybit'], symbol, timeframe, limit)
         
         if bingx_df is None or bybit_df is None:
             self.logger.error("Failed to fetch data from one or both exchanges")
