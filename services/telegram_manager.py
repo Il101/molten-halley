@@ -275,9 +275,7 @@ class TelegramSignalManager:
             start_time = time.time()
             confirmed = False
             last_stats = None
-            
-            # Optional: Send initial status message
-            status_msg = await original_msg.reply(f"🔍 ADF Test Passed. Monitoring for target Z-Score...\n(Timeout: {self.signal_timeout}s)")
+            status_msg = None
             
             while time.time() - start_time < self.signal_timeout:
                 stats = self.monitor.get_current_stats(symbol)
@@ -286,6 +284,14 @@ class TelegramSignalManager:
                     z_score = stats.get('z_score', 0)
                     net_spread_pct = stats.get('net_spread', 0)
                     
+                    # Send status message once we have the first Z-score
+                    if status_msg is None:
+                        status_msg = await original_msg.reply(
+                            f"🔍 Monitoring {symbol}...\n"
+                            f"Initial Z-Score: `{z_score:.2f}`\n"
+                            f"Target Z-Score: > `{self.tg_config.get('z_score_entry', 2.5)}`"
+                        )
+
                     # Check conditions
                     z_threshold = self.tg_config.get('z_score_entry', 2.5)
                     z_cond = abs(z_score) > z_threshold
@@ -313,18 +319,22 @@ class TelegramSignalManager:
                 net_spread = last_stats.get('net_spread', 0)
                 self.logger.info(f"🚀 Signal CONFIRMED for {symbol}! Replying to Telegram...")
                 
-                # Update status message or send new one
                 conf_text = f"✅ **Confirmed!**\nZ-Score: `{z_score:.2f}`\nNet Spread: `{net_spread:.2f}%`"
-                try:
-                    await status_msg.edit(conf_text)
-                except:
+                if status_msg:
+                    try:
+                        await status_msg.edit(conf_text)
+                    except:
+                        await original_msg.reply(conf_text)
+                else:
                     await original_msg.reply(conf_text)
             else:
                 self.logger.info(f"⏳ Signal for {symbol} timed out without confirmation.")
-                try:
-                    await status_msg.edit(f"⏳ Monitoring timed out for {symbol}.\nLast Z-Score: `{last_stats['z_score']:.2f}`" if last_stats else "⏳ Monitoring timed out.")
-                except:
-                    pass
+                if status_msg:
+                    try:
+                        last_z = f"`{last_stats['z_score']:.2f}`" if last_stats else "N/A"
+                        await status_msg.edit(f"⏳ Monitoring timed out for {symbol}.\nLast Z-Score: {last_z}")
+                    except:
+                        pass
 
         except Exception as e:
             self.logger.error(f"Error in signal confirmation flow for {symbol}: {e}", exc_info=True)
