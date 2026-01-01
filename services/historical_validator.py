@@ -14,6 +14,13 @@ import argparse
 import ccxt
 import pandas as pd
 import numpy as np
+import matplotlib
+import os
+
+# Set non-interactive backend for headless environments (Railway)
+if os.environ.get('DISPLAY') is None:
+    matplotlib.use('Agg')
+
 import matplotlib.pyplot as plt
 import seaborn as sns
 import yaml

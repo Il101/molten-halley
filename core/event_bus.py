@@ -5,7 +5,29 @@ Provides a centralized pub/sub system for ArbiBot components.
 Uses PyQt6 signals for GUI compatibility.
 """
 
-from PyQt6.QtCore import QObject, pyqtSignal
+try:
+    from PyQt6.QtCore import QObject, pyqtSignal
+    HAS_PYQT = True
+except ImportError:
+    HAS_PYQT = False
+    class QObject:
+        def __init__(self): pass
+    
+    class SimpleSignal:
+        def __init__(self, *args):
+            self._callbacks = []
+        def connect(self, callback):
+            self._callbacks.append(callback)
+        def emit(self, *args):
+            for callback in self._callbacks:
+                try:
+                    callback(*args)
+                except Exception as e:
+                    print(f"Error in signal callback: {e}")
+
+    def pyqtSignal(*args):
+        return SimpleSignal(*args)
+
 from typing import Dict, Any
 
 
@@ -13,30 +35,47 @@ class EventBus(QObject):
     """
     Singleton Event Bus for application-wide event distribution.
     
-    Uses PyQt6 signals for thread-safe, GUI-compatible event handling.
-    All components can emit and subscribe to events through this bus.
+    Uses PyQt6 signals when available for thread-safe, GUI-compatible event handling.
+    Falls back to a native Python implementation in headless environments.
     """
     
     # Singleton instance
     _instance = None
     
     # Signal definitions
-    price_updated = pyqtSignal(dict)  # Emitted on each price update
-    spread_updated = pyqtSignal(dict)  # Emitted with comprehensive spread data (gross, fee, net, z_score)
-    signal_triggered = pyqtSignal(str, str, float)  # (symbol, 'ENTRY'|'EXIT', z_score)
-    trade_opened = pyqtSignal(dict)  # Payload: {symbol, size, entry_price, side, ...}
-    trade_closed = pyqtSignal(dict)  # Payload: {symbol, pnl, exit_price, ...}
-    balance_updated = pyqtSignal(dict) # Payload: {exchange, available, total}
-    connection_status = pyqtSignal(str, bool)  # (exchange, connected)
-    error_occurred = pyqtSignal(str, str)  # (component, error_message)
-    log_message = pyqtSignal(str, str) # level, message (for GUI log console)
+    price_updated = pyqtSignal(dict)
+    spread_updated = pyqtSignal(dict)
+    signal_triggered = pyqtSignal(str, str, float)
+    trade_opened = pyqtSignal(dict)
+    trade_closed = pyqtSignal(dict)
+    balance_updated = pyqtSignal(dict)
+    connection_status = pyqtSignal(str, bool)
+    error_occurred = pyqtSignal(str, str)
+    log_message = pyqtSignal(str, str)
     
     def __init__(self):
         """Initialize Event Bus (private - use instance() instead)."""
         if EventBus._instance is not None:
             raise RuntimeError("EventBus is a singleton. Use EventBus.instance() instead.")
         
-        super().__init__()
+        if HAS_PYQT:
+            super().__init__()
+        else:
+            # Manually initialize signals for headless mode
+            # In PyQt, signals are class attributes that become bound on instance creation.
+            # In our SimpleSignal fallback, we need them to be instance attributes
+            # if we want multiple EventBus instances (though it's a singleton).
+            # To match PyQt behavior where signals are defined once:
+            self.price_updated = SimpleSignal(dict)
+            self.spread_updated = SimpleSignal(dict)
+            self.signal_triggered = SimpleSignal(str, str, float)
+            self.trade_opened = SimpleSignal(dict)
+            self.trade_closed = SimpleSignal(dict)
+            self.balance_updated = SimpleSignal(dict)
+            self.connection_status = SimpleSignal(str, bool)
+            self.error_occurred = SimpleSignal(str, str)
+            self.log_message = SimpleSignal(str, str)
+
         EventBus._instance = self
     
     @classmethod
