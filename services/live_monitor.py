@@ -82,15 +82,27 @@ class LiveMonitor:
             for ex_id in self.supported_exchanges
         }
         
-        # Spread history storage (symbol -> deque of historical GROSS spreads from 1m candles)
+        # Spread history storage (symbol -> deque of historical GROSS spreads)
         # CRITICAL: This stores GROSS SPREAD (market data), not net spread
         # Z-Score measures market anomaly, not profitability
         self.spread_history: Dict[str, deque] = {}
-        self.history_length = 60  # 60 minutes of historical baseline
+        
+        # Load Z-Score parameters from config
+        monitor_config = self.config.get('monitoring', {})
+        self.history_timeframe = monitor_config.get('timeframe', '5m')
+        self.history_length = monitor_config.get('history_length', 100)
+        
+        # Calculate update interval based on timeframe
+        timeframe_minutes = {
+            '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240
+        }
+        self.timeframe_mins = timeframe_minutes.get(self.history_timeframe, 5)
+        self.history_update_interval = self.timeframe_mins * 60  # Update interval in seconds
+        
+        self.logger.info(f"Z-Score Config: Timeframe={self.history_timeframe} ({self.timeframe_mins}m), Window={self.history_length} candles")
         
         # Track last history update time for each symbol
         self.last_history_update: Dict[str, float] = {}
-        self.history_update_interval = 60  # Update once per minute (seconds)
         
         # Track active exchange pairs for each symbol
         self.active_pairs: Dict[str, tuple] = {}  # symbol -> (ex_a, ex_b)
@@ -139,17 +151,17 @@ class LiveMonitor:
                 self.last_history_update[symbol] = time.time()
                 return
 
-            # Fetch 1-minute candles from both exchanges
+            # Fetch candles from both exchanges
             candles_a = await client_a.fetch_ohlcv(
                 symbol=symbol_a,
-                timeframe='1m',
-                limit=60
+                timeframe=self.history_timeframe,
+                limit=self.history_length
             )
             
             candles_b = await client_b.fetch_ohlcv(
                 symbol=symbol_b,
-                timeframe='1m',
-                limit=60
+                timeframe=self.history_timeframe,
+                limit=self.history_length
             )
             
             # Ensure we have data from both exchanges
@@ -199,7 +211,7 @@ class LiveMonitor:
             self.last_history_update[symbol] = time.time()
             
             self.logger.info(
-                f"✅ Pre-loaded 60 minutes of history for {symbol}. "
+                f"✅ Pre-loaded history for {symbol} ({self.history_timeframe}). "
                 f"Got {len(self.spread_history[symbol])} spread values. "
                 f"Initial Z-Score parameters set."
             )
@@ -258,7 +270,7 @@ class LiveMonitor:
         - Step B: Calculate Z-Score using GROSS spread against historical GROSS baseline
         - Step C: Calculate net_spread (gross_spread - fees) for profitability check
         - Step D: Signal ONLY if Z-Score high AND net_spread > 0
-        - Step E: Once per minute, update the historical baseline with GROSS spread
+        - Step E: Update the historical baseline with GROSS spread periodically
         
         Args:
             symbol: Trading pair symbol
@@ -373,7 +385,7 @@ class LiveMonitor:
         
         # === STEP E: HISTORY MAINTENANCE ===
         
-        # Update historical baseline once per minute
+        # Update historical baseline based on timeframe interval
         current_time = time.time()
         time_since_update = current_time - self.last_history_update.get(symbol, 0)
         

@@ -131,6 +131,10 @@ monitoring:
   log_level: 'INFO'             # DEBUG, INFO, WARNING, ERROR
   enable_console: true
   
+  # Z-Score Calculation Logic
+  timeframe: '5m'               # Timeframe for historical baseline (1m, 5m, 15m, 1h)
+  history_length: 100           # Number of candles for baseline (e.g., 100 * 5m = 500m ~ 8.3h)
+  
 # Scanner (market_scanner.py)
 scanner:
   scan_interval: 86400          # Seconds (24 hours)
