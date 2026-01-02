@@ -100,8 +100,8 @@ class LiveMonitor:
             ex: {} for ex in self.supported_exchanges
         }
         
-        # Signal state tracking
-        self.in_position: Dict[str, bool] = {}
+        # Signal persistence counters: symbol -> {'entry': int, 'exit': int}
+        self.signal_counters: Dict[str, Dict[str, int]] = {}
         
         # Control
         self.running = False
@@ -390,45 +390,79 @@ class LiveMonitor:
     
     async def _check_signals(self, symbol: str, z_score: float, net_spread_val: float, net_spread_pct: float) -> None:
         """
-        Check if entry or exit signal conditions are met.
-        
-        CRITICAL: Signal requires TWO conditions:
-        1. Z-Score exceeds threshold (market anomaly)
-        2. Net spread is positive (profitable after fees)
+        Check if entry or exit signal conditions are met using SIGNAL PERSISTENCE.
         
         Args:
             symbol: Trading pair symbol
-            z_score: Current Z-Score (based on gross spread)
-            net_spread_val: Net spread value after fees
-            net_spread_pct: Net spread percentage after fees
+            z_score: Current Z-Score
+            net_spread_val: Net spread value
+            net_spread_pct: Net spread percentage
         """
         z_entry = self.config['trading']['z_score_entry']
         z_exit = self.config['trading']['z_score_exit']
         
-        # Entry signal: |Z-Score| > threshold AND net_spread_pct > 0 (profitable)
-        if not self.in_position[symbol]:
-            if abs(z_score) > z_entry and net_spread_pct > 0:
-                self.in_position[symbol] = True
-                self.event_bus.emit_signal_triggered(symbol, 'ENTRY', z_score)
-                self.logger.info(
-                    f"🔔 ENTRY SIGNAL: {symbol} | Z-Score={z_score:.2f} | "
-                    f"Net Spread={net_spread_pct:.3f}% (Profitable!)"
-                )
-            elif abs(z_score) > z_entry and net_spread_pct <= 0:
-                # High Z-Score but unprofitable - log warning
-                self.logger.info(
-                    f"⚠️  HIGH Z-SCORE BUT UNPROFITABLE: {symbol} | Z-Score={z_score:.2f} | "
-                    f"Net Spread={net_spread_pct:.3f}% (Would lose money!)"
-                )
+        # Get persistence config (defaults: 3 ticks for entry, 5 for exit to be safe)
+        min_entry_ticks = self.config.get('trading', {}).get('min_entry_ticks', 3)
+        min_exit_ticks = self.config.get('trading', {}).get('min_exit_ticks', 5)
         
-        # Exit signal: |Z-Score| < exit threshold
+        # Initialize counters for symbol if needed
+        if symbol not in self.signal_counters:
+            self.signal_counters[symbol] = {'entry': 0, 'exit': 0}
+        
+        # === SIGNAL LOGIC ===
+        
+        # 1. ENTRY CONDITION
+        is_entry_condition = (not self.in_position[symbol] and 
+                            abs(z_score) > z_entry and 
+                            net_spread_pct > 0)
+        
+        # 2. EXIT CONDITION
+        is_exit_condition = (self.in_position[symbol] and 
+                           abs(z_score) < z_exit)
+
+        # Update Counters
+        if is_entry_condition:
+            self.signal_counters[symbol]['entry'] += 1
+            self.signal_counters[symbol]['exit'] = 0  # Reset exit counter
+        elif is_exit_condition:
+            self.signal_counters[symbol]['exit'] += 1
+            self.signal_counters[symbol]['entry'] = 0 # Reset entry counter
         else:
-            if abs(z_score) < z_exit:
-                self.in_position[symbol] = False
-                self.event_bus.emit_signal_triggered(symbol, 'EXIT', z_score)
-                self.logger.info(
-                    f"🔔 EXIT SIGNAL: {symbol} | Z-Score={z_score:.2f}"
-                )
+            # Noise / unstable state - reset both
+            if self.signal_counters[symbol]['entry'] > 0 or self.signal_counters[symbol]['exit'] > 0:
+                self.logger.debug(f"{symbol}: Signal lost stability. Resetting counters.")
+            self.signal_counters[symbol]['entry'] = 0
+            self.signal_counters[symbol]['exit'] = 0
+
+        # === TRIGGER ACTION ===
+        
+        # Check Entry Trigger
+        if self.signal_counters[symbol]['entry'] >= min_entry_ticks and not self.in_position[symbol]:
+            self.in_position[symbol] = True
+            self.event_bus.emit_signal_triggered(symbol, 'ENTRY', z_score)
+            
+            self.logger.info(
+                f"🔔 ENTRY SIGNAL: {symbol} | Z-Score={z_score:.2f} | "
+                f"Net Spread={net_spread_pct:.3f}% | "
+                f"Confirmed for {self.signal_counters[symbol]['entry']} ticks"
+            )
+            # Reset counter after action to prevent double firing? 
+            # Actually, keep it high or reset? 
+            # Resetting is safer to prevent immediate re-trigger if logic loops.
+            self.signal_counters[symbol]['entry'] = 0
+
+        # Check Exit Trigger
+        elif self.signal_counters[symbol]['exit'] >= min_exit_ticks and self.in_position[symbol]:
+            self.in_position[symbol] = False
+            self.event_bus.emit_signal_triggered(symbol, 'EXIT', z_score)
+            
+            self.logger.info(
+                f"🔔 EXIT SIGNAL: {symbol} | Z-Score={z_score:.2f} | "
+                f"Confirmed for {self.signal_counters[symbol]['exit']} ticks. "
+                f"[Audit: NetSpread={net_spread_pct:.3f}%]"
+            )
+            self.signal_counters[symbol]['exit'] = 0
+
     
     async def start(self, symbols: List[str], pair: tuple = ('bingx', 'bybit')) -> None:
         """

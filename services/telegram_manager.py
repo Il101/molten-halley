@@ -72,8 +72,8 @@ class TelegramSignalManager:
         
         # 3. Refined Spread Values (Various formats)
         # Category A: Course/Target Spreads (High Priority)
-        self.spread_format_course_1 = re.compile(r'(?:КУРСОВОЙ|КУРС|КУРСО|КУР|ОТКЛОНЕНИЕ|ОТКЛОН):\s*(-?\d+[.,]\d+)\s*%', re.IGNORECASE)
-        self.spread_format_course_2 = re.compile(r'(-?\d+[.,]\d+)\s*%\s*(?:КУРСОВОЙ|КУРС|КУРСО|КУР|ОТКЛОНЕНИЕ|ОТКЛОН)', re.IGNORECASE)
+        self.spread_format_course_1 = re.compile(r'(?:КУРСОВОЙ|КУРС|КУРСО|КУР):\s*(-?\d+[.,]\d+)\s*%', re.IGNORECASE)
+        self.spread_format_course_2 = re.compile(r'(-?\d+[.,]\d+)\s*%\s*(?:КУРСОВОЙ|КУРС|КУРСО|КУР)', re.IGNORECASE)
         self.spread_format_course_3 = re.compile(r'СПРЕД:\s*(-?\d+[.,]\d+)\s*%', re.IGNORECASE)
         # Catch spread in the same line as the symbol: "RIVER: bitget-bybit 3.92%"
         self.spread_format_course_header = re.compile(r'^[A-Z0-9]+:.*?\s*(-?\d+[.,]\d+)\s*%', re.IGNORECASE | re.MULTILINE)
@@ -222,10 +222,8 @@ class TelegramSignalManager:
 
         # 2. Extract Specialized Metadata
         
-        # Extract reported spread using multiple formats
+        # Extract reported spread strictly preferring "Курсовой:"
         reported_spread = 0.0
-        
-        # Priority 1: Course/Target Spreads
         spread_match = (
             self.spread_format_course_1.search(text) or 
             self.spread_format_course_2.search(text) or 
@@ -233,40 +231,35 @@ class TelegramSignalManager:
             self.spread_format_course_header.search(text)
         )
         
-        # Priority 2: Current/Live Spread (fallback only)
-        if not spread_match:
-            spread_match = self.spread_format_current.search(text)
-            if spread_match:
-                self.logger.debug("⚠️ Using Current Spread as fallback (no Course Spread found)")
-        
         if spread_match:
             try:
                 val_str = spread_match.group(1).replace(',', '.')
                 reported_spread = float(val_str) / 100
-                self.logger.debug(f"📊 Extracted spread: {reported_spread:.2%}")
+                self.logger.debug(f"📊 Extracted Курсовой spread: {reported_spread:.2%}")
             except (ValueError, IndexError):
                 pass
         
-        # Direction/Exchanges from 📗/📕 lines
-        direction = None
+        # Direction logic: First exchange in text is LONG, second is SHORT.
+        # Find all occurrences of supported exchanges in order of appearance.
         exchanges_mentioned = []
-        book_matches = self.book_line_regex.findall(text)
+        # Create a combined regex for all supported exchange names
+        ex_names = sorted(list(self.exchange_name_map.keys()), key=len, reverse=True)
+        ex_regex = re.compile(r'\b(' + '|'.join(map(re.escape, ex_names)) + r')\b', re.IGNORECASE)
         
-        # Extract exchanges from book lines using strict mapping
-        for emoji, ex_name_raw, dir_str in book_matches:
-            ex_name = ex_name_raw.strip().lower()
-            
-            # Use strict exchange name mapping
-            if ex_name in self.exchange_name_map:
-                internal_name = self.exchange_name_map[ex_name]
+        found_ex_matches = ex_regex.finditer(text)
+        
+        for m in found_ex_matches:
+            ex_name_raw = m.group(1).lower()
+            internal_name = self.exchange_name_map[ex_name_raw]
+            if internal_name not in exchanges_mentioned:
                 exchanges_mentioned.append(internal_name)
-                direction = dir_str.upper()
-                self.logger.debug(f"📊 Exchange matched: '{ex_name}' -> '{internal_name}', direction: {direction}")
         
-        # If no book lines found, fall back to simple detection if needed
-        if not book_matches:
-            # Legacy/Fallback detection could go here (Direction regex)
-            pass
+        # Strict Rule: 1st=LONG, 2nd=SHORT
+        direction = "SHORT" # Signal recommendation is for the bot's action (usually the second side)
+        if len(exchanges_mentioned) >= 2:
+            self.logger.info(f"🏛️ Exchange order: 1st={exchanges_mentioned[0]} (LONG), 2nd={exchanges_mentioned[1]} (SHORT)")
+        elif exchanges_mentioned:
+            self.logger.info(f"🏛️ Single exchange detected: {exchanges_mentioned[0]}")
         
         # Log detected exchanges
         if exchanges_mentioned:
@@ -290,11 +283,12 @@ class TelegramSignalManager:
             
             # Start asynchronous validation/monitoring flow
             if symbol not in self.active_signals or self.active_signals[symbol].done():
-                # Determine exchange pair (default to bingx-bybit if not enough exchanges mentioned)
+                # Determine exchange pair (Strict Rule: 1st=LONG, 2nd=SHORT)
                 if len(exchanges_mentioned) >= 2:
                     pair = (exchanges_mentioned[0], exchanges_mentioned[1])
+                    self.logger.info(f"⚖️ Arbitrage Pair: LONG on {pair[0]} | SHORT on {pair[1]}")
                 elif len(exchanges_mentioned) == 1:
-                    # One exchange mentioned, use bybit as fallback second exchange
+                    # One exchange mentioned, use bybit as fallback second exchange (SHORT side)
                     pair = (exchanges_mentioned[0], 'bybit') if exchanges_mentioned[0] != 'bybit' else ('bingx', 'bybit')
                 else:
                     pair = ('bingx', 'bybit')
@@ -302,7 +296,8 @@ class TelegramSignalManager:
                 metadata = {
                     'direction': direction, 
                     'reported_spread': reported_spread,
-                    'pair': pair
+                    'pair': pair,
+                    'is_custom_pair': len(exchanges_mentioned) >= 2
                 }
                 task = asyncio.create_task(self._validate_and_confirm(symbol, message, metadata))
                 self.active_signals[symbol] = task
@@ -317,9 +312,9 @@ class TelegramSignalManager:
         5. If confirmed -> Reply ✅
         """
         try:
-            # Check reported spread filter
+            # Check reported spread filter (using absolute value for magnitude)
             min_repo_spread = self.tg_config.get('min_signal_spread_pct', 0.0)
-            if metadata['reported_spread'] < min_repo_spread:
+            if abs(metadata['reported_spread']) < min_repo_spread:
                 self.logger.info(
                     f"⏩ {symbol} reported spread {metadata['reported_spread']:.2%} "
                     f"is below minimum {min_repo_spread:.2%}. Skipping."
