@@ -709,12 +709,13 @@ class WebSocketManager:
         except Exception as e:
             self.logger.error(f"Heartbeat error for {exchange_name}: {e}")
     
-    async def subscribe(self, symbols: List[str]) -> None:
+    async def subscribe(self, symbols: List[str], exchanges: List[str] = None) -> None:
         """
         Dynamically subscribe to additional symbols on active connections.
         
         Args:
             symbols: List of normalized symbols (e.g., ["BTC/USDT", "ETH/USDT"])
+            exchanges: Optional list of exchange names to subscribe on. If None, subscribes on all active connections.
         """
         if not symbols:
             return
@@ -728,9 +729,12 @@ class WebSocketManager:
         self.active_symbols.update(new_symbols)
         self.logger.info(f"Adding {len(new_symbols)} symbols to active subscriptions: {list(new_symbols)}")
         
-        # Subscribe on all active connections
-        for exchange_name, ws in self.connections.items():
-            if not ws.closed and self.connection_status.get(exchange_name, False):
+        # Subscribe on target connections
+        target_exchanges = exchanges if exchanges else list(self.connections.keys())
+        
+        for exchange_name in target_exchanges:
+            ws = self.connections.get(exchange_name)
+            if ws and not ws.closed and self.connection_status.get(exchange_name, False):
                 try:
                     await self._subscribe_symbols(exchange_name, ws, list(new_symbols))
                     self.logger.info(f"Successfully subscribed to {len(new_symbols)} symbols on {exchange_name}")
@@ -817,28 +821,42 @@ class WebSocketManager:
         """
         return self.connection_status.copy()
     
-    async def start(self, symbols: List[str]) -> None:
+    async def start(self, symbols: List[str], exchanges: List[str] = None) -> None:
         """
-        Start WebSocket connections for all enabled exchanges.
+        Start WebSocket connections for specifying enabled exchanges or all enabled if none given.
         
         Args:
             symbols: List of normalized symbols to monitor (e.g., ["BTC/USDT"])
+            exchanges: Optional list of exchange names to connect to. If None, connects to all enabled in config.
         """
         self.running = True
         
         # Initialize active symbols
         self.active_symbols = set(symbols)
-        self.logger.info(f"Starting WebSocket Manager for {len(symbols)} symbols: {symbols}")
         
-        # Start connection tasks for each exchange
+        # Filter exchanges to start
+        all_supported = ['bingx', 'bybit', 'bitget', 'gateio', 'htx', 'phemex', 'mexc']
+        
+        if exchanges:
+            # Only use exchanges that were specifically requested AND supported
+            exchanges_to_start = [e for e in exchanges if e in all_supported]
+            self.logger.info(f"Starting WebSocket Manager for {len(symbols)} symbols on requested exchanges: {exchanges_to_start}")
+        else:
+            # Default behavior: use all supported exchanges
+            exchanges_to_start = all_supported
+            self.logger.info(f"Starting WebSocket Manager for {len(symbols)} symbols on all supported exchanges")
+        
+        # Start connection tasks for each TARGET exchange
         # Note: connect_exchange will auto-subscribe to active_symbols on connection
-        all_exchanges = ['bingx', 'bybit', 'bitget', 'gateio', 'htx', 'phemex', 'mexc']
-        for exchange_name in all_exchanges:
+        for exchange_name in exchanges_to_start:
+            # Still check the 'enabled' flag in config for each exchange
             if self.config['websocket'].get(exchange_name, {}).get('enabled', True):
                 task = asyncio.create_task(
                     self.connect_exchange(exchange_name)
                 )
                 self.tasks.append(task)
+            else:
+                self.logger.debug(f"Skipping {exchange_name} (disabled in config)")
         
         self.logger.info("WebSocket Manager started")
     

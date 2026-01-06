@@ -497,8 +497,8 @@ class LiveMonitor:
             for symbol in symbols:
                 await self._preload_history(symbol, ex_a=pair[0], ex_b=pair[1])
             
-            # Subscribe dynamically
-            await self.ws_manager.subscribe(symbols)
+            # Subscribe dynamically on specific exchanges
+            await self.ws_manager.subscribe(symbols, exchanges=list(pair))
             return
 
         self.running = True
@@ -508,8 +508,8 @@ class LiveMonitor:
         for symbol in symbols:
             await self._preload_history(symbol, ex_a=pair[0], ex_b=pair[1])
         
-        # Start WebSocket manager
-        await self.ws_manager.start(symbols)
+        # Start WebSocket manager with specific exchanges
+        await self.ws_manager.start(symbols, exchanges=list(pair))
         
         # Start price processing task
         self.monitor_task = asyncio.create_task(self._process_price_updates())
