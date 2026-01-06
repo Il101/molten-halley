@@ -359,11 +359,19 @@ class TelegramSignalManager:
                     
                     # Send status message once we have the first Z-score
                     if status_msg is None:
-                        status_msg = await original_msg.reply(
-                            f"🔍 Monitoring {symbol}...\n"
-                            f"Initial Z-Score: `{z_score:.2f}`\n"
-                            f"Target Z-Score: > `{self.tg_config.get('z_score_entry', 2.5)}`"
-                        )
+                        try:
+                            self.logger.info(f"📤 Sending initial monitoring message for {symbol} to chat {original_msg.chat_id}...")
+                            status_msg = await self.client.send_message(
+                                original_msg.chat_id,
+                                f"🔍 Monitoring {symbol}...\n"
+                                f"Initial Z-Score: `{z_score:.2f}`\n"
+                                f"Target Z-Score: > `{self.tg_config.get('z_score_entry', 2.5)}`",
+                                reply_to=original_msg.id
+                            )
+                        except Exception as e:
+                            self.logger.error(f"Failed to send initial message: {e}")
+                            # Continue anyway, we might still confirm later
+                            status_msg = False # Mark as attempted but failed
 
                     # Check conditions
                     z_threshold = self.tg_config.get('z_score_entry', 2.5)
@@ -393,21 +401,32 @@ class TelegramSignalManager:
                 self.logger.info(f"🚀 Signal CONFIRMED for {symbol}! Replying to Telegram...")
                 
                 conf_text = f"✅ **Confirmed!**\nZ-Score: `{z_score:.2f}`\nNet Spread: `{net_spread:.2f}%`"
-                if status_msg:
+                if status_msg and status_msg is not True:
                     try:
-                        await status_msg.edit(conf_text)
-                    except:
-                        await original_msg.reply(conf_text)
+                        await self.client.edit_message(
+                            original_msg.chat_id,
+                            status_msg.id,
+                            conf_text
+                        )
+                        self.logger.info(f"✅ Confirmation message edited for {symbol}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to edit message, sending new reply: {e}")
+                        await self.client.send_message(original_msg.chat_id, conf_text, reply_to=original_msg.id)
                 else:
-                    await original_msg.reply(conf_text)
+                    await self.client.send_message(original_msg.chat_id, conf_text, reply_to=original_msg.id)
+                    self.logger.info(f"✅ Confirmation message sent for {symbol}")
             else:
                 self.logger.info(f"⏳ Signal for {symbol} timed out without confirmation.")
-                if status_msg:
+                if status_msg and status_msg is not True:
                     try:
                         last_z = f"`{last_stats['z_score']:.2f}`" if last_stats else "N/A"
-                        await status_msg.edit(f"⏳ Monitoring timed out for {symbol}.\nLast Z-Score: {last_z}")
-                    except:
-                        pass
+                        await self.client.edit_message(
+                            original_msg.chat_id,
+                            status_msg.id,
+                            f"⏳ Monitoring timed out for {symbol}.\nLast Z-Score: {last_z}"
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Failed to edit timeout message: {e}")
 
         except Exception as e:
             self.logger.error(f"Error in signal confirmation flow for {symbol}: {e}", exc_info=True)
