@@ -41,8 +41,8 @@ class TestSignalPersistence(unittest.TestCase):
         self.monitor.event_bus.emit_signal_triggered = MagicMock()
         
         # Reset state
-        self.monitor.in_position = {'BTC/USDT': False}
-        self.monitor.signal_counters = {} # Will be added in implementation
+        # self.monitor.in_position = {'BTC/USDT': False} - NO LONGER NEEDED, initialized in __init__
+        self.monitor.signal_counters = {}
 
     def test_immediate_reaction_without_persistence(self):
         """

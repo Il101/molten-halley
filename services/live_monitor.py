@@ -107,6 +107,9 @@ class LiveMonitor:
         # Track active exchange pairs for each symbol
         self.active_pairs: Dict[str, tuple] = {}  # symbol -> (ex_a, ex_b)
         
+        # Track position state for each symbol
+        self.in_position: Dict[str, bool] = {}
+        
         # Price cache for all exchanges
         self.price_cache: Dict[str, Dict[str, dict]] = {
             ex: {} for ex in self.supported_exchanges
@@ -325,9 +328,6 @@ class LiveMonitor:
         # Calculate gross spread percentage for display
         gross_spread_pct = (abs(gross_spread) / mid_price) * 100 if mid_price > 0 else 0.0
         
-        # Initialize position tracking if needed
-        if symbol not in self.in_position:
-            self.in_position[symbol] = False
         
         # === STEP B: CALCULATE Z-SCORE ON GROSS SPREAD ===
         
@@ -420,6 +420,9 @@ class LiveMonitor:
         # Initialize counters for symbol if needed
         if symbol not in self.signal_counters:
             self.signal_counters[symbol] = {'entry': 0, 'exit': 0}
+            
+        if symbol not in self.in_position:
+            self.in_position[symbol] = False
         
         # === SIGNAL LOGIC ===
         
@@ -543,6 +546,8 @@ class LiveMonitor:
         self.price_cache = {ex: {} for ex in self.supported_exchanges}
         self.last_history_update.clear()
         self.active_pairs.clear()
+        self.in_position.clear()
+        self.signal_counters.clear()
         
         self.logger.info("LiveMonitor stopped")
     
