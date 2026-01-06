@@ -63,6 +63,8 @@ arbitrage_analysis_plot.png
 .coverage
 htmlcov/
 
-# ArbiBot specific
+# Session/State
+*.session
+*.json.bak
 config/whitelist.json.bak
 backup/
