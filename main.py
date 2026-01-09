@@ -178,8 +178,15 @@ def run_telegram_manager(args):
     try:
         import asyncio
         from services.telegram_manager import TelegramSignalManager
+        from services.execution import ExecutionEngine
         
         manager = TelegramSignalManager(config_path=args.config)
+        
+        # Initialize Execution Engine (Handles Paper/Live automatically based on config)
+        execution_engine = ExecutionEngine(
+            config_path=args.config,
+            ws_manager=manager.monitor.ws_manager
+        )
         
         # Run async manager
         try:

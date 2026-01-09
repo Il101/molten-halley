@@ -454,7 +454,8 @@ class LiveMonitor:
         # Check Entry Trigger
         if self.signal_counters[symbol]['entry'] >= min_entry_ticks and not self.in_position[symbol]:
             self.in_position[symbol] = True
-            self.event_bus.emit_signal_triggered(symbol, 'ENTRY', z_score)
+            ex_a, ex_b = self.active_pairs[symbol]
+            self.event_bus.emit_signal_triggered(symbol, 'ENTRY', z_score, ex_a, ex_b)
             
             self.logger.info(
                 f"🔔 ENTRY SIGNAL: {symbol} | Z-Score={z_score:.2f} | "
@@ -469,7 +470,8 @@ class LiveMonitor:
         # Check Exit Trigger
         elif self.signal_counters[symbol]['exit'] >= min_exit_ticks and self.in_position[symbol]:
             self.in_position[symbol] = False
-            self.event_bus.emit_signal_triggered(symbol, 'EXIT', z_score)
+            ex_a, ex_b = self.active_pairs[symbol]
+            self.event_bus.emit_signal_triggered(symbol, 'EXIT', z_score, ex_a, ex_b)
             
             self.logger.info(
                 f"🔔 EXIT SIGNAL: {symbol} | Z-Score={z_score:.2f} | "

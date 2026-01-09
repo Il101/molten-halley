@@ -68,3 +68,6 @@ htmlcov/
 *.json.bak
 config/whitelist.json.bak
 backup/
+data/
+batch_1.txt
+weekly_logs.txt

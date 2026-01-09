@@ -45,7 +45,7 @@ class EventBus(QObject):
     # Signal definitions
     price_updated = pyqtSignal(dict)
     spread_updated = pyqtSignal(dict)
-    signal_triggered = pyqtSignal(str, str, float)
+    signal_triggered = pyqtSignal(str, str, float, str, str)
     trade_opened = pyqtSignal(dict)
     trade_closed = pyqtSignal(dict)
     balance_updated = pyqtSignal(dict)
@@ -68,7 +68,7 @@ class EventBus(QObject):
             # To match PyQt behavior where signals are defined once:
             self.price_updated = SimpleSignal(dict)
             self.spread_updated = SimpleSignal(dict)
-            self.signal_triggered = SimpleSignal(str, str, float)
+            self.signal_triggered = SimpleSignal(str, str, float, str, str)
             self.trade_opened = SimpleSignal(dict)
             self.trade_closed = SimpleSignal(dict)
             self.balance_updated = SimpleSignal(dict)
@@ -106,7 +106,7 @@ class EventBus(QObject):
         """
         self.price_updated.emit(data)
     
-    def emit_signal_triggered(self, symbol: str, signal_type: str, z_score: float) -> None:
+    def emit_signal_triggered(self, symbol: str, signal_type: str, z_score: float, ex_a: str = '', ex_b: str = '') -> None:
         """
         Emit a trading signal event.
         
@@ -114,8 +114,10 @@ class EventBus(QObject):
             symbol: Trading pair symbol
             signal_type: 'ENTRY' or 'EXIT'
             z_score: Z-Score at signal trigger
+            ex_a: First exchange name
+            ex_b: Second exchange name
         """
-        self.signal_triggered.emit(symbol, signal_type, z_score)
+        self.signal_triggered.emit(symbol, signal_type, z_score, ex_a, ex_b)
 
     def emit_trade_opened(self, trade_data: Dict[str, Any]) -> None:
         """Emit trade opened event."""

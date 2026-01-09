@@ -419,17 +419,9 @@ class MainWindow(QMainWindow):
             config = self.live_monitor.config
             mode = config.get('trading', {}).get('mode', 'PAPER')
             
-            # Create clients
-            client_a = create_exchange_client(
-                'bingx', config, mode, self.live_monitor.ws_manager
-            )
-            client_b = create_exchange_client(
-                'bybit', config, mode, self.live_monitor.ws_manager
-            )
-            
-            # Create Engine
+            # Create Engine (now handles multiple exchanges dynamically)
             self.execution_engine = ExecutionEngine(
-                client_a, client_b,
+                ws_manager=self.live_monitor.ws_manager,
                 position_size_usdt=config.get('trading', {}).get('position_size_usdt', 100.0)
             )
             
